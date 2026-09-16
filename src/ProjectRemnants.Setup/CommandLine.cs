@@ -14,9 +14,9 @@ internal static class CommandLine
                 return 0;
             }
 
-            if (args is ["--remove", var removeConfigPath])
+            if (args is ["--uninstall", var uninstallConfigPath])
             {
-                ProjectZomboidConfig.Remove(removeConfigPath);
+                ProjectZomboidConfig.Uninstall(uninstallConfigPath);
                 return 0;
             }
 

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -47,26 +48,99 @@ public static class ProjectZomboidConfig
 
     public static void Install(string configPath, string agentPath)
     {
+        EnsureGameStopped();
         configPath = RequireFile(configPath, "ProjectZomboid64.json");
         agentPath = RequireFile(agentPath, AgentLocator.AgentFileName);
         var root = ReadRoot(configPath);
         var arguments = GetVmArguments(root, create: true)!;
         RemoveNpcfwArguments(arguments);
         arguments.Insert(0, $"-javaagent:{NormalizeAgentPath(agentPath)}");
+        JavaAgentDependencies.Install(configPath);
         Save(configPath, root, createBackup: true);
     }
 
-    public static void Remove(string configPath)
+    public static void Uninstall(string configPath)
     {
+        EnsureGameStopped();
         configPath = RequireFile(configPath, "ProjectZomboid64.json");
+        var backup = configPath + BackupSuffix;
+        var legacyBackups = Directory.EnumerateFiles(
+            Path.GetDirectoryName(configPath)!,
+            "ProjectZomboid64.json.ProjectRemnantsBackup.*",
+            SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+        if (File.Exists(backup))
+        {
+            RestoreBackup(configPath, backup);
+        }
+        else if (legacyBackups.Length != 0)
+        {
+            RestoreBackup(configPath, legacyBackups[0]);
+        }
+        RemoveInjectedArguments(configPath);
+        JavaAgentDependencies.Uninstall(configPath, legacyBackups.Length != 0);
+        foreach (var legacyBackup in legacyBackups)
+        {
+            if (File.Exists(legacyBackup))
+            {
+                File.Delete(legacyBackup);
+            }
+        }
+    }
+
+    private static void RemoveInjectedArguments(string configPath)
+    {
         var root = ReadRoot(configPath);
         var arguments = GetVmArguments(root, create: false);
-        if (arguments is null || RemoveNpcfwArguments(arguments) == 0)
+        if (arguments is not null && RemoveNpcfwArguments(arguments) != 0)
         {
-            return;
+            Save(configPath, root, createBackup: false);
         }
+    }
 
-        Save(configPath, root, createBackup: true);
+    private static void EnsureGameStopped()
+    {
+        var running = new List<Process>();
+        try
+        {
+            foreach (var name in new[] { "ProjectZomboid64", "ProjectZomboid32", "ProjectZomboid" })
+            {
+                running.AddRange(Process.GetProcessesByName(name));
+            }
+
+            if (running.Count != 0)
+            {
+                var details = string.Join(", ", running.Select(process =>
+                    $"{process.ProcessName} (PID {process.Id})"));
+                throw new InvalidOperationException(
+                    $"Project Zomboid is still running: {details}. Close it completely and try again.");
+            }
+        }
+        finally
+        {
+            foreach (var process in running)
+            {
+                process.Dispose();
+            }
+        }
+    }
+
+    private static void RestoreBackup(string configPath, string backup)
+    {
+        _ = ReadRoot(backup);
+        var temporary = configPath + $".{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.Copy(backup, temporary);
+            File.Replace(temporary, configPath, null, ignoreMetadataErrors: true);
+            File.Delete(backup);
+        }
+        finally
+        {
+            if (File.Exists(temporary))
+            {
+                File.Delete(temporary);
+            }
+        }
     }
 
     private static JsonObject ReadRoot(string configPath)

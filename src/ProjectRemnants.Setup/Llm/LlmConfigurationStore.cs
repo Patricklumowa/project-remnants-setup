@@ -5,6 +5,7 @@ using System.Text.Json;
 namespace ProjectRemnants.Setup.Llm;
 
 public sealed record RemoteApiProfile(string Endpoint, string Model, string ApiKey);
+public sealed record LlmProviderConfiguration(string Provider, string Model);
 
 public static class LlmConfigurationStore
 {
@@ -45,6 +46,64 @@ public static class LlmConfigurationStore
         var directory = Path.GetFullPath(userDirectory);
         DeleteIfPresent(Path.Combine(directory, ProviderFile));
         DeleteIfPresent(Path.Combine(directory, LegacyModelFile));
+    }
+
+    public static void Uninstall(string userDirectory)
+    {
+        var directory = Path.GetFullPath(userDirectory);
+        DeleteIfPresent(Path.Combine(directory, ProviderFile));
+        DeleteIfPresent(Path.Combine(directory, LegacyModelFile));
+        DeleteIfPresent(Path.Combine(directory, ProfileFile));
+        foreach (var name in new[]
+        {
+            "NPCFW_combat_log.txt",
+            "NPCFW_vehicle_entry_debug.log"
+        })
+        {
+            DeleteIfPresent(Path.Combine(directory, name));
+        }
+
+        DeleteFiles(directory, "NPCFW_animdebug_*.csv", recurse: false);
+        DeleteFiles(directory, "NPCFW_character_*.log", recurse: false);
+        DeleteFiles(directory, "NPCFW_LLM_*.tmp", recurse: false);
+        var driveRecords = Path.Combine(directory, "NPCFW_drive_records");
+        if (Directory.Exists(driveRecords))
+        {
+            Directory.Delete(driveRecords, recursive: true);
+        }
+
+        var localMod = Path.Combine(directory, "mods", "ProjectRemnants");
+        if (Directory.Exists(localMod))
+        {
+            Directory.Delete(localMod, recursive: true);
+        }
+
+        var saves = Path.Combine(directory, "Saves");
+        DeleteFiles(saves, "NPCFW_Data.bin", recurse: true);
+        DeleteFiles(saves, "NPCFW_Safehouses.bin", recurse: true);
+    }
+
+    public static LlmProviderConfiguration? LoadProvider(string userDirectory)
+    {
+        var path = Path.Combine(Path.GetFullPath(userDirectory), ProviderFile);
+        if (!File.Exists(path) || new FileInfo(path).Length > 32_768)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
+            var provider = document.RootElement.GetProperty("provider").GetString()?.Trim();
+            var model = document.RootElement.GetProperty("model").GetString()?.Trim();
+            return provider is "ollama" or "openai" && !string.IsNullOrWhiteSpace(model)
+                ? new LlmProviderConfiguration(provider, model)
+                : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     public static void SaveRemoteProfile(string userDirectory, RemoteApiProfile profile)
@@ -162,5 +221,23 @@ public static class LlmConfigurationStore
             File.Delete(path);
         }
     }
-}
 
+    private static void DeleteFiles(string directory, string pattern, bool recurse)
+    {
+        if (!Directory.Exists(directory))
+        {
+            return;
+        }
+
+        var options = new EnumerationOptions
+        {
+            RecurseSubdirectories = recurse,
+            IgnoreInaccessible = false,
+            AttributesToSkip = FileAttributes.ReparsePoint
+        };
+        foreach (var path in Directory.EnumerateFiles(directory, pattern, options))
+        {
+            File.Delete(path);
+        }
+    }
+}
