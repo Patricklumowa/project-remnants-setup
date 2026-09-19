@@ -8,6 +8,19 @@ namespace ProjectRemnants.Setup.Llm;
 
 public sealed record OllamaProgress(string Message, int? Percent = null, bool Log = false);
 
+public enum GpuAcceleration
+{
+    Unknown,
+    None,
+    NvidiaCuda,
+    AmdRocm
+}
+
+public sealed record GpuInfo(
+    string Name, string Summary, string Detail, GpuAcceleration Acceleration);
+
+public sealed record GpuAdapter(string Name, double VramGb, bool Discrete);
+
 public sealed class OllamaDriver : IAsyncDisposable
 {
     private static readonly Uri Server = new("http://127.0.0.1:11434/");
@@ -242,35 +255,192 @@ public sealed class OllamaDriver : IAsyncDisposable
             controllers?.Contains("Radeon", StringComparison.OrdinalIgnoreCase) == true;
     }
 
-    public static IReadOnlyList<string> RecommendModels(double vramGb) =>
-        vramGb >= 8
-            ? ["qwen3:8b", "qwen3:4b", "llama3.2:3b"]
-            : vramGb >= 4
-                ? ["llama3.2:3b", "qwen3:4b"]
-                : ["llama3.2:1b"];
+    private static readonly (double ParametersB, string Name)[] RecommendationLadder =
+    [
+        (1, "llama3.2:1b"),
+        (3, "llama3.2:3b"),
+        (4, "qwen3:4b"),
+        (8, "qwen3:8b"),
+        (14, "qwen3:14b"),
+        (32, "qwen3:32b"),
+        (70, "llama3.1:70b")
+    ];
+
+    public static IReadOnlyList<string> RecommendModels(double vramGb)
+    {
+        var budget = Math.Max(vramGb, 0) * 0.88;
+        var fitting = RecommendationLadder
+            .Where(entry => ModelFit.EstimateDownloadGb(entry.ParametersB) <= budget)
+            .ToArray();
+        if (fitting.Length == 0)
+        {
+            return ["llama3.2:1b"];
+        }
+
+        return fitting
+            .Reverse()
+            .Take(3)
+            .Select(entry => entry.Name)
+            .ToArray();
+    }
 
     public static IReadOnlyList<string> RecommendModelsForThisPc() => RecommendModels(DetectVramGb());
 
-    private static double DetectVramGb()
+    public static string RecommendationTip(double vramGb)
     {
-        var output = Run("nvidia-smi.exe",
-            "--query-gpu=memory.total", "--format=csv,noheader,nounits");
-        var megabytes = output?.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-            .Select(value => double.TryParse(value.Trim(), CultureInfo.InvariantCulture, out var size)
-                ? size
-                : 0)
-            .DefaultIfEmpty()
-            .Max() ?? 0;
-        if (megabytes > 0)
+        if (vramGb <= 0)
         {
-            return megabytes / 1024;
+            return "Tip: no GPU detected. Small models like llama3.2:1b run best on the CPU.";
         }
 
-        output = Run("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-            "(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Measure-Object -Property AdapterRAM -Maximum).Maximum");
-        return double.TryParse(output?.Trim(), CultureInfo.InvariantCulture, out var bytes)
-            ? bytes / 1_073_741_824D
-            : 0;
+        var recommended = RecommendModels(vramGb);
+        return $"Tip: {recommended[0]} is a good match for your {vramGb:0.#} GB GPU.";
+    }
+
+    public static GpuInfo DetectPreferredGpu() => DescribePreferredGpu(QueryGpuInventory());
+
+    public static GpuInfo DescribePreferredGpu(IReadOnlyList<GpuAdapter> graphics)
+    {
+        if (graphics.Count == 0)
+        {
+            return new GpuInfo(
+                "Unknown", "No GPU detected", "Ollama will run on the CPU.", GpuAcceleration.None);
+        }
+
+        if (graphics.Count == 1)
+        {
+            var only = graphics[0];
+            return new GpuInfo(
+                only.Name,
+                $"Only GPU: {only.Name}",
+                $"Ollama will use {only.Name}.",
+                Classify(only));
+        }
+
+        var withVram = graphics.Where(record => record.VramGb > 0).ToArray();
+        if (withVram.Length == 0)
+        {
+            var first = graphics[0];
+            return new GpuInfo(
+                first.Name,
+                $"Selected GPU: {first.Name}",
+                "Ollama will auto-select the GPU.",
+                GpuAcceleration.Unknown);
+        }
+
+        var preferred = withVram
+            .OrderByDescending(record => record.Discrete)
+            .ThenByDescending(record => record.VramGb)
+            .First();
+        var acceleration = Classify(preferred);
+        var reason = acceleration == GpuAcceleration.None
+            ? $"{preferred.Name} has the most video memory."
+            : $"Ollama will use {preferred.Name}, the fastest GPU with the most memory.";
+        return new GpuInfo(
+            preferred.Name,
+            $"Preferred GPU: {preferred.Name}",
+            reason,
+            acceleration);
+    }
+
+    public static GpuAcceleration Classify(string name, bool discrete = true)
+    {
+        if (name.Contains("nvidia", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("geforce", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("rtx", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("quadro", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("tesla", StringComparison.OrdinalIgnoreCase))
+        {
+            return GpuAcceleration.NvidiaCuda;
+        }
+
+        if (name.Contains("radeon", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("amd", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("ryzen", StringComparison.OrdinalIgnoreCase))
+        {
+            return GpuAcceleration.AmdRocm;
+        }
+
+        return discrete ? GpuAcceleration.Unknown : GpuAcceleration.None;
+    }
+
+    private static GpuAcceleration Classify(GpuAdapter record) =>
+        Classify(record.Name, record.Discrete);
+
+    private static IReadOnlyList<GpuAdapter> QueryGpuInventory()
+    {
+        var records = new List<GpuAdapter>();
+        var nvidia = Run("nvidia-smi.exe",
+            "--query-gpu=name,memory.total", "--format=csv,noheader,nounits");
+        if (!string.IsNullOrWhiteSpace(nvidia))
+        {
+            foreach (var line in nvidia.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var fields = line.Split(',', StringSplitOptions.TrimEntries);
+                if (fields.Length != 0 && !string.IsNullOrWhiteSpace(fields[0]))
+                {
+                    var vramGb = fields.Length > 1 &&
+                        double.TryParse(fields[1], CultureInfo.InvariantCulture, out var megabytes)
+                            ? megabytes / 1024
+                            : 0;
+                    records.Add(new GpuAdapter(fields[0], vramGb, Discrete: true));
+                }
+            }
+        }
+
+        var output = Run("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            "(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | " +
+            "Select-Object Name,AdapterRAM | ConvertTo-Json -Compress)");
+        if (!string.IsNullOrWhiteSpace(output))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(output);
+                var elements = document.RootElement.ValueKind == JsonValueKind.Array
+                    ? document.RootElement.EnumerateArray()
+                    : EnumerateSingle(document.RootElement);
+                foreach (var element in elements)
+                {
+                    var name = element.TryGetProperty("Name", out var nameElement)
+                        ? nameElement.GetString()
+                        : null;
+                    if (string.IsNullOrWhiteSpace(name) || records.Any(record =>
+                        record.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        continue;
+                    }
+
+                    var bytes = element.TryGetProperty("AdapterRAM", out var memoryElement) &&
+                        memoryElement.ValueKind == JsonValueKind.Number &&
+                        memoryElement.TryGetDouble(out var value)
+                            ? value
+                            : 0;
+                    var vramGb = bytes / 1_073_741_824D;
+                    records.Add(new GpuAdapter(name, vramGb, vramGb >= 6));
+                }
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        return records;
+    }
+
+    private static IEnumerable<JsonElement> EnumerateSingle(JsonElement element)
+    {
+        yield return element;
+    }
+
+    public static double DetectVramGb() => QueryGpuInventory()
+        .Select(record => record.VramGb)
+        .DefaultIfEmpty()
+        .Max();
+
+    public static double DetectSystemRamGb()
+    {
+        var bytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        return bytes > 0 ? bytes / 1_073_741_824D : 0;
     }
 
     private static string? Run(string fileName, params string[] arguments)
