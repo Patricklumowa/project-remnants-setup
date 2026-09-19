@@ -14,6 +14,10 @@ try
     TestSteamDiscovery(root);
     TestLlmConfiguration(root);
     await TestOllamaModelDetection(root);
+    TestGpuDetection();
+    TestModelFit();
+    TestCatalogParsing();
+    TestRemoteModelDiscovery();
     await TestBridgeLifecycle();
     Console.WriteLine("All smoke tests passed.");
     return 0;
@@ -245,9 +249,9 @@ static async Task TestOllamaModelDetection(string root)
         "Downloaded Ollama models were not detected.");
     Assert(OllamaDriver.RecommendModels(8).SequenceEqual(
         ["qwen3:8b", "qwen3:4b", "llama3.2:3b"]),
-        "The high-end recommendations are wrong.");
+        "The 8 GB recommendations are wrong.");
     Assert(OllamaDriver.RecommendModels(4).SequenceEqual(
-        ["llama3.2:3b", "qwen3:4b"]),
+        ["qwen3:4b", "llama3.2:3b", "llama3.2:1b"]),
         "The 4 GB recommendations are wrong.");
     Assert(OllamaDriver.RecommendModels(2).SequenceEqual(["llama3.2:1b"]),
         "The fallback recommendation is wrong.");
@@ -255,6 +259,146 @@ static async Task TestOllamaModelDetection(string root)
         "The Ollama download percentage was not parsed.");
     Assert(OllamaDriver.GetProgressPercent("pulling manifest") is null,
         "A non-progress Ollama line produced a percentage.");
+}
+
+static void TestGpuDetection()
+{
+    Assert(OllamaDriver.Classify("NVIDIA GeForce RTX 5070 Laptop GPU") ==
+        GpuAcceleration.NvidiaCuda, "An NVIDIA GPU was not classified as CUDA.");
+    Assert(OllamaDriver.Classify("AMD Radeon(TM) 610M", discrete: false) ==
+        GpuAcceleration.AmdRocm, "An AMD GPU was not classified as ROCm.");
+    Assert(OllamaDriver.Classify("Intel(R) UHD Graphics", discrete: false) ==
+        GpuAcceleration.None, "An integrated non-AMD/NVIDIA GPU was not treated as unsupported.");
+
+    var hybrid = OllamaDriver.DescribePreferredGpu(
+    [
+        new GpuAdapter("AMD Radeon(TM) 610M", 0.5, Discrete: false),
+        new GpuAdapter("NVIDIA GeForce RTX 5070 Laptop GPU", 7.96, Discrete: true)
+    ]);
+    Assert(hybrid.Acceleration == GpuAcceleration.NvidiaCuda,
+        "The discrete NVIDIA GPU was not preferred.");
+    Assert(hybrid.Name == "NVIDIA GeForce RTX 5070 Laptop GPU",
+        "The wrong GPU was reported as preferred.");
+    Assert(hybrid.Summary == "Preferred GPU: NVIDIA GeForce RTX 5070 Laptop GPU",
+        "The preferred GPU summary text is wrong.");
+
+    var only = OllamaDriver.DescribePreferredGpu(
+        [new GpuAdapter("Intel(R) Arc(TM) Graphics", 4, Discrete: true)]);
+    Assert(only.Summary == "Only GPU: Intel(R) Arc(TM) Graphics",
+        "A single GPU was not reported as the only GPU.");
+
+    var none = OllamaDriver.DescribePreferredGpu([]);
+    Assert(none.Acceleration == GpuAcceleration.None && none.Summary == "No GPU detected",
+        "A GPU-less machine was not handled.");
+}
+
+static void TestModelFit()
+{
+    Assert(ModelFit.TryParseParametersB("7b", out var seven) && Math.Abs(seven - 7) < 0.001,
+        "A plain billion size was not parsed.");
+    Assert(ModelFit.TryParseParametersB("3.8b", out var threePointEight) &&
+        Math.Abs(threePointEight - 3.8) < 0.001, "A fractional billion size was not parsed.");
+    Assert(ModelFit.TryParseParametersB("8x22b", out var mixture) &&
+        Math.Abs(mixture - 176) < 0.001, "A mixture-of-experts size was not parsed.");
+    Assert(ModelFit.TryParseParametersB("335m", out var million) &&
+        Math.Abs(million - 0.335) < 0.001, "A million-parameter size was not parsed.");
+    Assert(!ModelFit.TryParseParametersB("tools", out _),
+        "A capability was parsed as a size.");
+
+    Assert(ModelFit.Evaluate(ModelFit.EstimateDownloadGb(8), 7.96, 16) == Runability.Gpu,
+        "An 8B model did not fit an 8 GB GPU.");
+    Assert(ModelFit.Evaluate(ModelFit.EstimateDownloadGb(176), 7.96, 16) == Runability.TooBig,
+        "A 176B mixture was wrongly judged runnable.");
+    Assert(ModelFit.Evaluate(ModelFit.EstimateDownloadGb(8), 0, 32) == Runability.CpuOnly,
+        "A GPU-less PC with enough RAM was not CPU-only.");
+    Assert(ModelFit.Evaluate(ModelFit.EstimateDownloadGb(8), 0, 4) == Runability.TooBig,
+        "A model larger than RAM was wrongly judged runnable.");
+    Assert(ModelFit.Evaluate(ModelFit.EstimateDownloadGb(120), 7.96, 32) == Runability.TooBig,
+        "A model too large for the PC was judged runnable because it is also on cloud.");
+
+    var recommended = OllamaDriver.RecommendModels(7.96);
+    Assert(recommended.Contains("qwen3:8b"), "An 8 GB GPU did not recommend an 8B model.");
+
+    Assert(OllamaDriver.RecommendationTip(7.96).Contains("qwen3:8b"),
+        "The 8 GB GPU tip did not suggest an 8B model.");
+    Assert(OllamaDriver.RecommendationTip(7.96).Contains("8 GB"),
+        "The tip did not report the GPU size.");
+    Assert(OllamaDriver.RecommendationTip(0).Contains("no GPU"),
+        "A GPU-less PC tip did not mention the CPU fallback.");
+    Assert(!recommended.SequenceEqual(["llama3.2:1b"]), "An 8 GB GPU fell back to the tiny model.");
+    Assert(OllamaDriver.RecommendModels(0.5).SequenceEqual(["llama3.2:1b"]),
+        "A tiny GPU did not fall back to the smallest model.");
+}
+
+static void TestCatalogParsing()
+{
+    const string html = """
+        <ul role="list" class="grid grid-cols-1 gap-y-3">
+          <li  class="flex items-baseline border-b border-neutral-200 py-6">
+            <a href="/library/llama3.2" class="group w-full space-y-5">
+              <p class="max-w-lg break-words text-neutral-800 text-md">Meta&#39;s Llama 3.2 goes small.</p>
+              <span class="x">tools</span>
+              <span class="x">1b</span>
+              <span class="x">3b</span>
+            </a>
+          </li>
+          <li  class="flex items-baseline border-b border-neutral-200 py-6">
+            <a href="/library/gemma3" class="group w-full space-y-5">
+              <p class="max-w-lg break-words text-neutral-800 text-md">Most capable model.</p>
+              <span class="x">vision</span>
+              <span class="x">4b</span>
+            </a>
+          </li>
+          <li  class="flex items-baseline border-b border-neutral-200 py-6">
+            <a href="/library/nomic-embed-text" class="group w-full space-y-5">
+              <p class="max-w-lg break-words text-neutral-800 text-md">An embedding model.</p>
+              <span class="x">embedding</span>
+            </a>
+          </li>
+        </ul>
+        """;
+
+    var models = OllamaCatalog.Parse(html);
+    Assert(models.Count == 3, $"Expected 3 catalogue models, got {models.Count}.");
+    var llama = models.Single(model => model.Name == "llama3.2");
+    Assert(llama.Description == "Meta's Llama 3.2 goes small.",
+        "The HTML-encoded description was not decoded.");
+    Assert(llama.Capabilities.Contains("tools"), "The model capability was not captured.");
+    Assert(llama.Tags.Select(tag => tag.Tag).SequenceEqual(["1b", "3b"]),
+        "The model size tags were not captured in order.");
+    Assert(llama.DownloadNames.SequenceEqual(["llama3.2:1b", "llama3.2:3b"]),
+        "The downloadable tag names are wrong.");
+    var embed = models.Single(model => model.Name == "nomic-embed-text");
+    Assert(embed.Tags.Count == 0 && embed.DownloadNames.SequenceEqual(["nomic-embed-text"]),
+        "A size-less model should download under its bare name.");
+}
+
+static void TestRemoteModelDiscovery()
+{
+    Assert(RemoteModelDiscovery.BuildModelsUri("https://api.openai.com/v1").AbsoluteUri ==
+        "https://api.openai.com/v1/models", "A base endpoint did not map to /models.");
+    Assert(RemoteModelDiscovery.BuildModelsUri("https://api.openai.com/v1/").AbsoluteUri ==
+        "https://api.openai.com/v1/models", "A trailing slash was not handled.");
+    Assert(RemoteModelDiscovery.BuildModelsUri(
+        "https://api.example.com/v1/chat/completions").AbsoluteUri ==
+        "https://api.example.com/v1/models", "A chat-completions URL did not map to /models.");
+    Assert(RemoteModelDiscovery.BuildModelsUri(
+        "https://api.example.com/v1/models").AbsoluteUri ==
+        "https://api.example.com/v1/models", "A /models URL was double-appended.");
+
+    var openAiShape = RemoteModelDiscovery.Parse(
+        """
+        {"object":"list","data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini"},{"id":"gpt-4o"}]}
+        """);
+    Assert(openAiShape.SequenceEqual(["gpt-4o", "gpt-4o-mini"]),
+        "The OpenAI model list was not parsed and de-duplicated.");
+
+    Assert(RemoteModelDiscovery.Parse("""["a","b"]""").SequenceEqual(["a", "b"]),
+        "A bare id array was not parsed.");
+    Assert(RemoteModelDiscovery.Parse("""[{"id":"m1"},{"id":"m2"}]""").SequenceEqual(["m1", "m2"]),
+        "A bare object array was not parsed.");
+    Assert(RemoteModelDiscovery.Parse("not json").Count == 0, "Invalid JSON produced models.");
+    Assert(RemoteModelDiscovery.Parse("").Count == 0, "Empty input produced models.");
 }
 
 static async Task TestBridgeLifecycle()
