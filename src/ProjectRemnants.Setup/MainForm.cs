@@ -15,12 +15,28 @@ public sealed class MainForm : Form
     private readonly ComboBox _model = new();
     private readonly TextBox _endpoint = new();
     private readonly TextBox _apiKey = new();
+    private readonly Label _gpuStatus = new();
+    private readonly Label _modelTip = new();
+    private Label? _endpointLabel;
+    private Label? _apiKeyLabel;
+    private FlowLayoutPanel? _modelTrailing;
+    private readonly Button _browseCatalog = new();
+    private readonly Button _checkModels = new();
+    private IReadOnlyList<string> _ollamaModelChoices = [];
+    private IReadOnlyList<string> _remoteModelChoices = [];
+    private string _ollamaSelection = "llama3.2:3b";
+    private string _remoteSelection = string.Empty;
+    private int _lastProviderIndex;
     private readonly Button _configureLlm = new();
     private readonly Button _disableLlm = new();
     private readonly TableLayoutPanel _progressPanel = new();
     private readonly ProgressBar _progress = new();
     private readonly Label _progressStatus = new();
     private readonly TextBox _activity = new();
+    private FlowLayoutPanel? _footer;
+    private Button? _githubButton;
+    private Button? _kofiButton;
+    private LinkLabel? _kofiMessage;
     private readonly NotifyIcon _trayIcon = new();
     private readonly ToolTip _toolTip = new();
     private readonly OllamaDriver _ollama = new();
@@ -34,10 +50,13 @@ public sealed class MainForm : Form
     {
         Text = "Project Remnants Setup";
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(680, 428);
-        FormBorderStyle = FormBorderStyle.FixedSingle;
-        MaximizeBox = false;
         Font = new Font("Segoe UI", 9F);
+        AutoScaleMode = AutoScaleMode.Font;
+        AutoScaleDimensions = new SizeF(6F, 13F);
+        ClientSize = new Size(720, 560);
+        MinimumSize = new Size(620, 520);
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MaximizeBox = true;
         BackColor = Color.FromArgb(245, 246, 248);
         Icon = LoadAppIcon();
 
@@ -62,7 +81,7 @@ public sealed class MainForm : Form
         };
         shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         shell.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        shell.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         shell.Controls.Add(tabs, 0, 0);
         shell.Controls.Add(BuildFooter(), 0, 1);
         Controls.Add(shell);
@@ -73,44 +92,100 @@ public sealed class MainForm : Form
         FormClosing += HandleClosing;
     }
 
+    protected override void OnHandleCreated(EventArgs eventArgs)
+    {
+        base.OnHandleCreated(eventArgs);
+        ApplyFooterScale();
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs eventArgs)
+    {
+        base.OnDpiChangedAfterParent(eventArgs);
+        ApplyFooterScale();
+    }
+
     private Control BuildFooter()
     {
         var footer = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             FlowDirection = FlowDirection.LeftToRight,
-            Padding = new Padding(8, 3, 0, 3),
+            WrapContents = false,
+            Padding = new Padding(8, 4, 8, 4),
             Margin = Padding.Empty,
             BackColor = Color.FromArgb(238, 240, 244)
         };
-        footer.Controls.Add(CreateLinkButton(
-            CreateGitHubIcon(),
+        _githubButton = CreateIconButton(
             "Open the Project Remnants Setup source on GitHub",
-            "https://github.com/Patricklumowa/project-remnants-setup"));
-        footer.Controls.Add(CreateLinkButton(
-            CreateKofiIcon(),
+            "https://github.com/Patricklumowa/project-remnants-setup");
+        _kofiButton = CreateIconButton(
             "Support Project Remnants on Ko-fi",
-            "https://ko-fi.com/patricius"));
+            "https://ko-fi.com/patricius");
+        footer.Controls.Add(_githubButton);
+        footer.Controls.Add(_kofiButton);
+
+        _kofiMessage = new LinkLabel
+        {
+            AutoSize = true,
+            LinkBehavior = LinkBehavior.NeverUnderline,
+            LinkColor = Color.FromArgb(41, 171, 224),
+            ActiveLinkColor = Color.FromArgb(24, 128, 173),
+            VisitedLinkColor = Color.FromArgb(41, 171, 224),
+            Text = "help me eat gng\U0001F62D\U0001F62D",
+            Font = new Font("Segoe UI", 9F, FontStyle.Regular),
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(2, 0, 0, 0)
+        };
+        _kofiMessage.LinkClicked += (_, _) => OpenUrl("https://ko-fi.com/patricius");
+        _toolTip.SetToolTip(_kofiMessage, "Support Project Remnants on Ko-fi");
+        footer.Controls.Add(_kofiMessage);
+        _footer = footer;
         return footer;
     }
 
-    private Button CreateLinkButton(Image image, string description, string url)
+    private void ApplyFooterScale()
+    {
+        if (_footer is null)
+        {
+            return;
+        }
+
+        var buttonSize = ScaleLogical(28);
+        var inset = new Padding(ScaleLogical(4), ScaleLogical(3), ScaleLogical(4), ScaleLogical(3));
+        _footer.Padding = inset;
+        foreach (var button in new[] { _githubButton, _kofiButton })
+        {
+            if (button is null)
+            {
+                continue;
+            }
+
+            button.Size = new Size(buttonSize, buttonSize);
+            button.Image?.Dispose();
+            button.Image = ReferenceEquals(button, _githubButton)
+                ? CreateGitHubIcon()
+                : CreateKofiIcon();
+        }
+    }
+
+    private Button CreateIconButton(string description, string url)
     {
         var button = new Button
         {
             AccessibleName = description,
             Cursor = Cursors.Hand,
             FlatStyle = FlatStyle.Flat,
-            Image = image,
+            ImageAlign = ContentAlignment.MiddleCenter,
             Margin = new Padding(0, 0, 6, 0),
-            Size = new Size(36, 36),
+            Padding = Padding.Empty,
             TabStop = true
         };
         button.FlatAppearance.BorderSize = 0;
         button.FlatAppearance.MouseOverBackColor = Color.FromArgb(220, 224, 231);
         button.FlatAppearance.MouseDownBackColor = Color.FromArgb(207, 212, 220);
         button.Click += (_, _) => OpenUrl(url);
-        button.Disposed += (_, _) => image.Dispose();
         _toolTip.SetToolTip(button, description);
         return button;
     }
@@ -127,12 +202,18 @@ public sealed class MainForm : Form
         }
     }
 
-    private static Bitmap CreateGitHubIcon()
+    private const float IconLogicalSize = 20F;
+
+    private int ScaleLogical(float logical) =>
+        (int)Math.Round(logical * DeviceDpi / 96.0);
+
+    private Bitmap CreateGitHubIcon()
     {
-        var image = new Bitmap(24, 24);
+        var pixels = ScaleLogical(IconLogicalSize);
+        var image = new Bitmap(pixels, pixels);
         using var graphics = Graphics.FromImage(image);
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        graphics.ScaleTransform(1.2F, 1.2F);
+        graphics.ScaleTransform(pixels / IconLogicalSize, pixels / IconLogicalSize);
         using var brush = new SolidBrush(Color.FromArgb(31, 35, 40));
         graphics.FillPolygon(brush, [
             new PointF(3.5F, 7), new PointF(3.2F, 2.5F), new PointF(7.2F, 4.8F),
@@ -149,12 +230,13 @@ public sealed class MainForm : Form
         return image;
     }
 
-    private static Bitmap CreateKofiIcon()
+    private Bitmap CreateKofiIcon()
     {
-        var image = new Bitmap(24, 24);
+        var pixels = ScaleLogical(IconLogicalSize);
+        var image = new Bitmap(pixels, pixels);
         using var graphics = Graphics.FromImage(image);
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        graphics.ScaleTransform(1.2F, 1.2F);
+        graphics.ScaleTransform(pixels / IconLogicalSize, pixels / IconLogicalSize);
         using var blue = new SolidBrush(Color.FromArgb(41, 171, 224));
         using var white = new SolidBrush(Color.White);
         using var red = new SolidBrush(Color.FromArgb(255, 94, 91));
@@ -172,31 +254,33 @@ public sealed class MainForm : Form
     {
         var page = new TabPage("Game Setup") { BackColor = BackColor, Padding = new Padding(16) };
         var layout = CreatePageLayout();
-        layout.Controls.Add(CreateHeading("Java agent installation"), 0, 0);
-        layout.Controls.Add(CreatePathRow(
-            "Game config", _configPath, BrowseConfig), 0, 1);
-        layout.Controls.Add(CreatePathRow("NPCFW.jar", _agentPath, BrowseAgent), 0, 2);
+        AddHeading(layout, "Java agent installation");
+
+        AddPathRow(layout, 1, "Game config", _configPath, BrowseConfig);
+        AddPathRow(layout, 2, "NPCFW.jar", _agentPath, BrowseAgent);
 
         var actions = new FlowLayoutPanel
         {
             AutoSize = true,
             FlowDirection = FlowDirection.LeftToRight,
-            Margin = new Padding(145, 10, 0, 5)
+            Margin = new Padding(0, 10, 0, 5),
+            Anchor = AnchorStyles.Left
         };
         actions.Controls.Add(CreateButton("Install / Repair", InstallAgent, true));
         actions.Controls.Add(CreateButton("Detect Again", (_, _) => DetectInstall()));
-        layout.Controls.Add(actions, 0, 3);
+        layout.Controls.Add(actions, 1, 3);
 
         var uninstall = CreateButton("Full Uninstall", Uninstall, false);
         uninstall.ForeColor = Color.Firebrick;
         uninstall.FlatAppearance.BorderColor = Color.FromArgb(190, 90, 90);
-        uninstall.Margin = new Padding(145, 12, 0, 4);
-        layout.Controls.Add(uninstall, 0, 4);
+        uninstall.Margin = new Padding(0, 12, 0, 4);
+        uninstall.Anchor = AnchorStyles.Left;
+        layout.Controls.Add(uninstall, 1, 4);
 
         _setupStatus.AutoSize = true;
         _setupStatus.ForeColor = Color.FromArgb(70, 76, 86);
-        _setupStatus.Margin = new Padding(145, 8, 0, 0);
-        layout.Controls.Add(_setupStatus, 0, 5);
+        _setupStatus.Margin = new Padding(0, 8, 0, 0);
+        layout.Controls.Add(_setupStatus, 1, 5);
         page.Controls.Add(layout);
         return page;
     }
@@ -204,46 +288,78 @@ public sealed class MainForm : Form
     private TabPage BuildLlmPage()
     {
         var page = new TabPage("LLM Companion") { BackColor = BackColor, Padding = new Padding(16) };
-        var layout = CreatePageLayout();
-        layout.Controls.Add(CreateHeading("Optional conversation provider"), 0, 0);
-        layout.Controls.Add(CreatePathRow(
-            "Zomboid folder", _userDirectory, BrowseUserDirectory), 0, 1);
+        var host = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = BackColor };
+        var layout = CreateScrollablePageLayout();
+        host.ClientSizeChanged += (_, _) =>
+            layout.Width = host.ClientSize.Width - (layout.Left + layout.Margin.Horizontal);
+        AddHeading(layout, "Optional conversation provider");
+
+        AddPathRow(layout, 1, "Zomboid folder", _userDirectory, BrowseUserDirectory);
 
         _provider.DropDownStyle = ComboBoxStyle.DropDownList;
         _provider.Items.AddRange(["Local Ollama", "OpenAI-compatible API"]);
         _provider.SelectedIndex = 0;
         _provider.SelectedIndexChanged += ProviderChanged;
-        layout.Controls.Add(CreateField("Provider", _provider), 0, 2);
+        AddField(layout, 2, "Provider", _provider);
 
         _model.DropDownStyle = ComboBoxStyle.DropDown;
         _model.Text = "llama3.2:3b";
-        layout.Controls.Add(CreateField("Model", _model), 0, 3);
+        ConfigureButton(_browseCatalog, "Browse catalogue...", BrowseCatalog);
+        _browseCatalog.Margin = new Padding(8, 0, 0, 0);
+        ConfigureButton(_checkModels, "Check availability", CheckRemoteModels);
+        _checkModels.Margin = new Padding(8, 0, 0, 0);
+        _toolTip.SetToolTip(
+            _checkModels, "Fetch the models this endpoint and API key can use");
+        _modelTrailing = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = Padding.Empty
+        };
+        _modelTrailing.Controls.Add(_browseCatalog);
+        _modelTrailing.Controls.Add(_checkModels);
+        AddField(layout, 3, "Model", _model, _modelTrailing);
+
+        _gpuStatus.AutoSize = true;
+        _gpuStatus.ForeColor = Color.FromArgb(70, 76, 86);
+        _gpuStatus.Margin = new Padding(0, 5, 0, 4);
+        AddField(layout, 4, "GPU (Ollama)", _gpuStatus);
+
+        _modelTip.AutoSize = true;
+        _modelTip.MaximumSize = new Size(560, 0);
+        _modelTip.ForeColor = Color.FromArgb(30, 120, 72);
+        _modelTip.Font = new Font("Segoe UI", 9F, FontStyle.Italic);
+        _modelTip.Margin = new Padding(0, 2, 0, 6);
+        _modelTip.Visible = false;
+        layout.Controls.Add(_modelTip, 1, 5);
+        layout.SetColumnSpan(_modelTip, 2);
 
         _endpoint.Text = "https://api.openai.com/v1";
-        var endpointField = CreateField("Endpoint", _endpoint);
-        layout.Controls.Add(endpointField, 0, 4);
+        _endpointLabel = AddField(layout, 6, "Endpoint", _endpoint);
 
         _apiKey.UseSystemPasswordChar = true;
-        var apiKeyField = CreateField("API key", _apiKey);
-        layout.Controls.Add(apiKeyField, 0, 5);
+        _apiKeyLabel = AddField(layout, 7, "API key", _apiKey);
 
         var actions = new FlowLayoutPanel
         {
             AutoSize = true,
             FlowDirection = FlowDirection.LeftToRight,
-            Margin = new Padding(145, 8, 0, 4)
+            Margin = new Padding(0, 8, 0, 4),
+            Anchor = AnchorStyles.Left
         };
         ConfigureButton(_configureLlm, "Configure and Start", ConfigureLlm, true);
         ConfigureButton(_disableLlm, "Disable", DisableLlm);
         actions.Controls.Add(_configureLlm);
         actions.Controls.Add(_disableLlm);
-        layout.Controls.Add(actions, 0, 6);
+        layout.Controls.Add(actions, 1, 8);
 
-        _progressPanel.Dock = DockStyle.Top;
+        _progressPanel.Dock = DockStyle.Fill;
+        _progressPanel.AutoSize = true;
         _progressPanel.ColumnCount = 2;
         _progressPanel.RowCount = 1;
-        _progressPanel.Height = 24;
-        _progressPanel.Margin = new Padding(145, 5, 0, 5);
+        _progressPanel.Margin = new Padding(0, 5, 0, 5);
         _progressPanel.Visible = false;
         _progressPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 44));
         _progressPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 56));
@@ -256,91 +372,114 @@ public sealed class MainForm : Form
         _progressStatus.ForeColor = Color.FromArgb(70, 76, 86);
         _progressPanel.Controls.Add(_progress, 0, 0);
         _progressPanel.Controls.Add(_progressStatus, 1, 0);
-        layout.Controls.Add(_progressPanel, 0, 7);
+        layout.Controls.Add(_progressPanel, 1, 9);
 
         _activity.Dock = DockStyle.Fill;
         _activity.Multiline = true;
         _activity.ReadOnly = true;
-        _activity.ScrollBars = ScrollBars.Vertical;
+        _activity.ScrollBars = ScrollBars.Both;
+        _activity.WordWrap = false;
         _activity.BackColor = Color.White;
-        _activity.MinimumSize = new Size(0, 95);
-        _activity.Height = 110;
-        _activity.Margin = new Padding(145, 4, 0, 0);
-        layout.Controls.Add(_activity, 0, 8);
-        page.Controls.Add(layout);
+        _activity.Font = new Font("Consolas", 9F);
+        _activity.Height = 240;
+        _activity.Margin = new Padding(0, 4, 0, 0);
+        layout.Controls.Add(_activity, 1, 10);
+        layout.SetColumnSpan(_activity, 2);
+        host.Controls.Add(layout);
+        page.Controls.Add(host);
 
         _userDirectory.Text = LlmConfigurationStore.DefaultUserDirectory;
         LoadSavedLlmSettings();
         UpdateProviderFields();
+        _ = RefreshGpuStatusAsync();
         return page;
     }
 
-    private static TableLayoutPanel CreatePageLayout() => new()
+    private static TableLayoutPanel CreatePageLayout()
     {
-        Dock = DockStyle.Fill,
-        AutoScroll = true,
-        ColumnCount = 1,
-        RowCount = 9
-    };
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            ColumnCount = 3,
+            RowCount = 10
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        for (var row = 0; row < 9; row++)
+        {
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        }
 
-    private static Control CreateHeading(string title)
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        return layout;
+    }
+
+    private static TableLayoutPanel CreateScrollablePageLayout()
     {
-        var panel = new TableLayoutPanel
+        var layout = new TableLayoutPanel
         {
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Dock = DockStyle.Top,
-            ColumnCount = 1,
-            RowCount = 1,
-            Margin = new Padding(0, 0, 0, 12)
+            ColumnCount = 3,
+            RowCount = 11
         };
-        panel.Controls.Add(new Label
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        for (var row = 0; row < 10; row++)
+        {
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        }
+
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 240F));
+        return layout;
+    }
+
+    private static void AddHeading(TableLayoutPanel layout, string title)
+    {
+        var heading = new Label
         {
             AutoSize = true,
             Font = new Font("Segoe UI Semibold", 14F),
             Text = title,
-            ForeColor = Color.FromArgb(34, 39, 48)
-        }, 0, 0);
-        return panel;
+            ForeColor = Color.FromArgb(34, 39, 48),
+            Margin = new Padding(0, 0, 0, 12)
+        };
+        layout.Controls.Add(heading, 0, 0);
+        layout.SetColumnSpan(heading, 3);
     }
 
-    private static Control CreatePathRow(string label, TextBox textBox, EventHandler browse)
+    private static void AddPathRow(
+        TableLayoutPanel layout, int row, string label, TextBox textBox, EventHandler browse)
     {
-        var grid = new TableLayoutPanel
-        {
-            AutoSize = true,
-            Dock = DockStyle.Top,
-            ColumnCount = 3,
-            Margin = new Padding(0, 3, 0, 4)
-        };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145F));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        grid.Controls.Add(CreateLabel(label), 0, 0);
+        layout.Controls.Add(CreateLabel(label), 0, row);
         textBox.Dock = DockStyle.Fill;
         textBox.Margin = new Padding(0, 2, 0, 0);
-        grid.Controls.Add(textBox, 1, 0);
+        layout.Controls.Add(textBox, 1, row);
         var button = CreateButton("Browse", browse);
         button.Margin = new Padding(8, 0, 0, 0);
-        grid.Controls.Add(button, 2, 0);
-        return grid;
+        layout.Controls.Add(button, 2, row);
     }
 
-    private static TableLayoutPanel CreateField(string label, Control control)
+    private static Label AddField(
+        TableLayoutPanel layout, int row, string label, Control control, Control? trailing = null)
     {
-        var panel = new TableLayoutPanel
-        {
-            AutoSize = true,
-            Dock = DockStyle.Top,
-            ColumnCount = 2,
-            Margin = new Padding(0, 3, 0, 4)
-        };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145F));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-        panel.Controls.Add(CreateLabel(label), 0, 0);
+        var labelControl = CreateLabel(label);
+        layout.Controls.Add(labelControl, 0, row);
         control.Dock = DockStyle.Fill;
         control.Margin = new Padding(0, 2, 0, 0);
-        panel.Controls.Add(control, 1, 0);
-        return panel;
+        layout.Controls.Add(control, 1, row);
+        if (trailing is not null)
+        {
+            trailing.Anchor = AnchorStyles.Left;
+            trailing.Margin = new Padding(8, 1, 0, 0);
+            layout.Controls.Add(trailing, 2, row);
+        }
+
+        return labelControl;
     }
 
     private static Label CreateLabel(string text) => new()
@@ -537,6 +676,36 @@ public sealed class MainForm : Form
         }
     }
 
+    private async void BrowseCatalog(object? sender, EventArgs eventArgs)
+    {
+        if (_provider.SelectedIndex != 0)
+        {
+            return;
+        }
+
+        _browseCatalog.Enabled = false;
+        try
+        {
+            var (vram, ram) = await Task.Run(() =>
+                (OllamaDriver.DetectVramGb(), OllamaDriver.DetectSystemRamGb()));
+            using var dialog = new ModelCatalogForm(_ollama, vram, ram);
+            if (dialog.ShowDialog(this) == DialogResult.OK && dialog.SelectedModel is { } model)
+            {
+                _ollamaSelection = model;
+                _model.Text = model;
+                Log($"Selected model from catalogue: {model}");
+            }
+        }
+        catch (Exception exception)
+        {
+            ShowError(exception.Message);
+        }
+        finally
+        {
+            _browseCatalog.Enabled = true;
+        }
+    }
+
     private void BrowseUserDirectory(object? sender, EventArgs eventArgs)
     {
         using var dialog = new FolderBrowserDialog
@@ -641,21 +810,13 @@ public sealed class MainForm : Form
                 return;
             }
 
-            _model.BeginUpdate();
-            try
-            {
-                _model.Items.Clear();
-                _model.Items.AddRange(choices.Cast<object>().ToArray());
-            }
-            finally
-            {
-                _model.EndUpdate();
-            }
-
-            _model.Text = models.Count == 0
+            _ollamaSelection = models.Count == 0
                 ? choices[0]
                 : models.FirstOrDefault(model =>
                     model.Equals(selected, StringComparison.OrdinalIgnoreCase)) ?? models[0];
+            _ollamaModelChoices = choices;
+            ApplyModelChoices(_ollamaModelChoices, remote: false);
+
             Log(models.Count == 0
                 ? $"Recommended for this GPU: {string.Join(" or ", choices)}"
                 : $"Found {models.Count} downloaded Ollama model{(models.Count == 1 ? string.Empty : "s")}.");
@@ -666,24 +827,153 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task RefreshGpuStatusAsync()
+    {
+        _gpuStatus.Text = "Detecting...";
+        _gpuStatus.ForeColor = Color.FromArgb(70, 76, 86);
+        try
+        {
+            var (gpu, vram) = await Task.Run(() =>
+                (OllamaDriver.DetectPreferredGpu(), OllamaDriver.DetectVramGb()));
+            _gpuStatus.Text = gpu.Summary;
+            _gpuStatus.ForeColor = gpu.Acceleration == GpuAcceleration.None
+                ? Color.DarkGoldenrod
+                : Color.FromArgb(30, 120, 72);
+            _toolTip.SetToolTip(_gpuStatus, gpu.Detail);
+
+            _modelTip.Text = OllamaDriver.RecommendationTip(vram);
+            _modelTip.Visible = _provider.SelectedIndex == 0;
+        }
+        catch (Exception exception)
+        {
+            _gpuStatus.Text = "Could not detect a GPU";
+            _gpuStatus.ForeColor = Color.DarkGoldenrod;
+            _toolTip.SetToolTip(_gpuStatus, exception.Message);
+        }
+    }
+
     private void UpdateProviderFields()
     {
         var remote = _provider.SelectedIndex == 1;
+
+        if (remote != (_lastProviderIndex == 1))
+        {
+            if (_lastProviderIndex == 0)
+            {
+                _ollamaSelection = _model.Text.Trim();
+            }
+            else
+            {
+                _remoteSelection = _model.Text.Trim();
+            }
+        }
+
+        _lastProviderIndex = remote ? 1 : 0;
+
         _endpoint.Visible = remote;
         _apiKey.Visible = remote;
-        var endpointContainer = _endpoint.Parent;
-        var apiKeyContainer = _apiKey.Parent;
-        if (endpointContainer is not null)
+        if (_endpointLabel is not null)
         {
-            endpointContainer.Visible = remote;
+            _endpointLabel.Visible = remote;
         }
 
-        if (apiKeyContainer is not null)
+        if (_apiKeyLabel is not null)
         {
-            apiKeyContainer.Visible = remote;
+            _apiKeyLabel.Visible = remote;
         }
 
+        _browseCatalog.Visible = !remote;
+        _checkModels.Visible = remote;
+        _modelTip.Visible = !remote && _modelTip.Text.Length != 0;
+
+        ApplyModelChoices(remote ? _remoteModelChoices : _ollamaModelChoices, remote);
         _configureLlm.Text = remote ? "Start Secure Bridge" : "Configure and Start";
+    }
+
+    private void ApplyModelChoices(IReadOnlyList<string> choices, bool remote)
+    {
+        var preferred = remote ? _remoteSelection : _ollamaSelection;
+        _model.BeginUpdate();
+        try
+        {
+            _model.Items.Clear();
+            if (choices.Count != 0)
+            {
+                _model.Items.AddRange(choices.Cast<object>().ToArray());
+            }
+        }
+        finally
+        {
+            _model.EndUpdate();
+        }
+
+        var match = choices.FirstOrDefault(choice =>
+            choice.Equals(preferred, StringComparison.OrdinalIgnoreCase));
+        if (match is not null)
+        {
+            _model.Text = match;
+        }
+        else if (choices.Count != 0)
+        {
+            _model.Text = choices[0];
+        }
+        else if (remote)
+        {
+            _model.Text = string.Empty;
+            _model.SelectedIndex = -1;
+        }
+        else if (!string.IsNullOrWhiteSpace(preferred))
+        {
+            _model.Text = preferred;
+        }
+
+        _model.Enabled = !remote || choices.Count != 0;
+    }
+
+    private async void CheckRemoteModels(object? sender, EventArgs eventArgs)
+    {
+        var endpoint = _endpoint.Text.Trim();
+        if (endpoint.Length == 0)
+        {
+            ShowError("Enter the endpoint first.");
+            return;
+        }
+
+        _checkModels.Enabled = false;
+        SetBusy(true);
+        try
+        {
+            Log($"Checking models at {endpoint}...");
+            var models = await RemoteModelDiscovery.ListAsync(endpoint, _apiKey.Text);
+            if (models.Count == 0)
+            {
+                Log("The endpoint returned no models.");
+                MessageBox.Show(
+                    this,
+                    "The endpoint is reachable but returned no models for this key.",
+                    "Project Remnants Setup",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            var previous = _model.Text.Trim();
+            _remoteSelection = models.FirstOrDefault(model =>
+                model.Equals(previous, StringComparison.OrdinalIgnoreCase)) ?? models[0];
+            _remoteModelChoices = models;
+            ApplyModelChoices(_remoteModelChoices, remote: true);
+            Log($"Found {models.Count} model{(models.Count == 1 ? string.Empty : "s")} for this endpoint.");
+        }
+        catch (Exception exception)
+        {
+            Log($"Error: {exception.Message}");
+            ShowError(exception.Message);
+        }
+        finally
+        {
+            SetBusy(false);
+            _checkModels.Enabled = true;
+        }
     }
 
     private async void ConfigureLlm(object? sender, EventArgs eventArgs)
@@ -795,6 +1085,7 @@ public sealed class MainForm : Form
         _model.Text = configuration.Model;
         if (!configuration.Provider.Equals("openai", StringComparison.OrdinalIgnoreCase))
         {
+            _ollamaSelection = configuration.Model;
             _provider.SelectedIndex = 0;
             return;
         }
@@ -808,6 +1099,7 @@ public sealed class MainForm : Form
         _endpoint.Text = profile.Endpoint;
         _model.Text = profile.Model;
         _apiKey.Text = profile.ApiKey;
+        _remoteSelection = profile.Model;
         _provider.SelectedIndex = 1;
     }
 
