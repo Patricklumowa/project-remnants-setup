@@ -761,6 +761,12 @@ public sealed class MainForm : Form
 
     private async Task<bool> EnsureOllamaInstalledAsync()
     {
+        if (await _ollama.IsReadyAsync())
+        {
+            Log("Ollama server is running.");
+            return true;
+        }
+
         var executable = _ollama.FindExecutable();
         if (executable is not null)
         {
@@ -797,7 +803,7 @@ public sealed class MainForm : Form
         try
         {
             var selected = _model.Text.Trim();
-            var models = _ollama.GetDownloadedModels();
+            var models = await _ollama.GetModelsAsync();
             IReadOnlyList<string> choices = models;
             if (models.Count == 0)
             {
