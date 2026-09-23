@@ -1036,6 +1036,7 @@ public sealed class MainForm : Form
             await RefreshOllamaModelsAsync();
         }
 
+        await _ollama.WarmModelAsync(model, new Progress<OllamaProgress>(UpdateProgress));
         LlmConfigurationStore.SaveOllama(_userDirectory.Text, model);
         Log($"Local model configured: {model}");
         ShowTrayIfNeeded();

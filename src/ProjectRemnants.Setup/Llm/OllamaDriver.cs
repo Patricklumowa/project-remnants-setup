@@ -667,6 +667,63 @@ public sealed class OllamaDriver : IAsyncDisposable
             : null;
     }
 
+    public async Task WarmModelAsync(
+        string model, IProgress<OllamaProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        progress?.Report(new OllamaProgress($"Loading {model} into memory", null, true));
+        using var client = new HttpClient
+        {
+            BaseAddress = Server,
+            Timeout = TimeSpan.FromMinutes(5)
+        };
+        await WarmModelAsync(client, model, cancellationToken);
+        progress?.Report(new OllamaProgress($"{model} is ready for in-game use", 100, true));
+    }
+
+    public static async Task WarmModelAsync(
+        HttpClient client, string model, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            throw new ArgumentException("Select a local model first.", nameof(model));
+        }
+
+        using var response = await client.PostAsJsonAsync("api/generate", new
+        {
+            model = model.Trim(),
+            stream = false,
+            keep_alive = "1h"
+        }, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            string detail;
+            try
+            {
+                using var error = JsonDocument.Parse(body);
+                detail = error.RootElement.TryGetProperty("error", out var message)
+                    ? message.GetString() ?? body
+                    : body;
+            }
+            catch (JsonException)
+            {
+                detail = body;
+            }
+
+            throw new InvalidOperationException(
+                $"Ollama could not load {model}: {detail.Trim()}");
+        }
+
+        using var result = JsonDocument.Parse(
+            await response.Content.ReadAsStreamAsync(cancellationToken));
+        if (!result.RootElement.TryGetProperty("done", out var done) ||
+            done.ValueKind != JsonValueKind.True)
+        {
+            throw new InvalidOperationException($"Ollama did not finish loading {model}.");
+        }
+    }
+
     public async Task UnloadModelAsync(string model)
     {
         if (!await IsReadyAsync() || string.IsNullOrWhiteSpace(model))

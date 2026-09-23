@@ -14,6 +14,7 @@ try
     TestSteamDiscovery(root);
     TestLlmConfiguration(root);
     await TestOllamaModelDetection(root);
+    await TestOllamaWarmup();
     TestGpuDetection();
     TestModelFit();
     TestCatalogParsing();
@@ -442,4 +443,61 @@ static void Assert(bool condition, string message)
     {
         throw new InvalidOperationException(message);
     }
+}
+
+static async Task TestOllamaWarmup()
+{
+    var calls = 0;
+    using var handler = new WarmupHandler(async (request, cancellationToken) =>
+    {
+        calls++;
+        Assert(request.Method == HttpMethod.Post &&
+            request.RequestUri?.AbsolutePath == "/api/generate",
+            "Model warmup did not use Ollama's generate endpoint.");
+        using var body = JsonDocument.Parse(
+            await request.Content!.ReadAsStreamAsync(cancellationToken));
+        Assert(body.RootElement.GetProperty("model").GetString() == "llama3.2:3b" &&
+            body.RootElement.GetProperty("stream").GetBoolean() == false &&
+            body.RootElement.GetProperty("keep_alive").GetString() == "1h" &&
+            !body.RootElement.TryGetProperty("prompt", out _),
+            "Model warmup did not send a load-only request.");
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"done\":true,\"done_reason\":\"load\"}")
+        };
+    });
+    using var client = new HttpClient(handler)
+    {
+        BaseAddress = new Uri("http://127.0.0.1:11434/")
+    };
+    await OllamaDriver.WarmModelAsync(client, " llama3.2:3b ");
+    Assert(calls == 1, "Model warmup sent more than one request.");
+
+    using var failureHandler = new WarmupHandler((_, _) => Task.FromResult(
+        new HttpResponseMessage(System.Net.HttpStatusCode.InternalServerError)
+        {
+            Content = new StringContent("{\"error\":\"not enough memory\"}")
+        }));
+    using var failureClient = new HttpClient(failureHandler)
+    {
+        BaseAddress = new Uri("http://127.0.0.1:11434/")
+    };
+    try
+    {
+        await OllamaDriver.WarmModelAsync(failureClient, "llama3.2:3b");
+        throw new InvalidOperationException("A failed warmup was reported as ready.");
+    }
+    catch (InvalidOperationException exception) when (
+        exception.Message.Contains("not enough memory", StringComparison.Ordinal))
+    {
+    }
+}
+
+sealed class WarmupHandler(
+    Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond)
+    : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken) =>
+        respond(request, cancellationToken);
 }
