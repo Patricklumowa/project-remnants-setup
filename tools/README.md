@@ -14,10 +14,10 @@ The app reports **forced-model benchmark** action extraction scores. It sends al
 
 ## Windows publish package
 
-The working Desktop package is a framework-dependent single file. It needs the .NET 10 Windows Desktop Runtime, but embeds the benchmark pack and needs no JDK or game JAR. Publish it with:
+The Desktop and release package is a self-contained single file. It includes the .NET 10 Windows Desktop Runtime and the benchmark pack, so users need no separate runtime, JDK, or game JAR. Publish it with:
 
 ```powershell
-dotnet publish src\ProjectRemnants.Setup\ProjectRemnants.Setup.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish\v0.2.3-benchmark
+dotnet publish src\ProjectRemnants.Setup\ProjectRemnants.Setup.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish\v0.2.3-benchmark
 ```
 
-On the development PC, Smart App Control allowed this package while blocking the new unsigned self-contained bundle. This is an observed result for this build and PC; trusted code signing is needed for reliable distribution to protected Windows devices.
+On the development PC, Smart App Control blocks this unsigned self-contained bundle. Trusted code signing is needed for reliable distribution to protected Windows devices.
