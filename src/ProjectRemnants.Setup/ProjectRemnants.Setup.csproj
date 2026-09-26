@@ -5,9 +5,12 @@
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>ProjectRemnantsSetup</AssemblyName>
     <RootNamespace>ProjectRemnants.Setup</RootNamespace>
-    <Version>0.2.2</Version>
+    <Version>0.2.3</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <DebugType>embedded</DebugType>
   </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Benchmark\forced-model-pack-v1.json" />
+  </ItemGroup>
 </Project>

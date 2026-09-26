@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using ProjectRemnants.Setup.Benchmark;
 using ProjectRemnants.Setup.Install;
 using ProjectRemnants.Setup.Llm;
 
@@ -15,6 +16,7 @@ try
     TestLlmConfiguration(root);
     await TestOllamaModelDetection(root);
     await TestOllamaWarmup();
+    await TestForcedModelBenchmark(root);
     TestGpuDetection();
     TestModelFit();
     TestCatalogParsing();
@@ -493,6 +495,95 @@ static async Task TestOllamaWarmup()
     }
 }
 
+static async Task TestForcedModelBenchmark(string root)
+{
+    var pack = BenchmarkPack.Load();
+    Assert(pack.Version == "1.0.0" && pack.Cases.Count == 223, "The bundled test pack must contain 223 cases.");
+    Assert(pack.Cases.Count(item => item.JavaBypass == "status") == 1 &&
+        pack.Cases.Count(item => item.JavaBypass == "stub") == 2,
+        "The test pack lost the Java status or stub bypass cases.");
+    var chatCalls = 0;
+    var bypassCalls = 0;
+    using var handler = new WarmupHandler(async (request, cancellationToken) =>
+    {
+        var path = request.RequestUri!.AbsolutePath;
+        if (path == "/api/show") return JsonReply("{\"details\":{\"quantization_level\":\"Q4_K_M\"}}");
+        if (path == "/api/generate") return JsonReply("{\"done\":true}");
+        if (path == "/api/ps") return JsonReply(
+            "{\"models\":[{\"name\":\"test:tag\",\"size\":1000,\"size_vram\":600}]}");
+        Assert(path == "/api/chat", "Benchmark used the wrong model endpoint.");
+        var item = pack.Cases[chatCalls++];
+        if (item.JavaBypass.Length != 0) bypassCalls++;
+        using var sent = JsonDocument.Parse(await request.Content!.ReadAsStreamAsync(cancellationToken));
+        var payload = sent.RootElement;
+        Assert(payload.GetProperty("model").GetString() == "test:tag" &&
+            payload.GetProperty("options").GetProperty("num_ctx").GetInt32() == 4096 &&
+            payload.TryGetProperty("format", out _) &&
+            payload.GetProperty("messages").EnumerateArray().Last().GetProperty("content")
+                .GetString()!.Contains(item.Utterance, StringComparison.Ordinal),
+            "A packed production request was not sent to the selected model.");
+        if (chatCalls == 2) return JsonReply("not json");
+        if (chatCalls == 3) return new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable)
+        {
+            Content = new StringContent("unavailable")
+        };
+        if (chatCalls == 4) await Task.Delay(Timeout.Infinite, cancellationToken);
+        return JsonReply(JsonSerializer.Serialize(new
+        {
+            done = true,
+            message = new { content = "{\"dialogue\":\"OK\",\"relationship\":\"SKIP\",\"action\":{\"type\":\"NONE\",\"mode\":\"\",\"actor\":\"\",\"target\":\"\",\"item\":\"\",\"source\":\"\",\"destination\":\"\",\"location\":\"\",\"quantity\":1,\"all\":false,\"deliveries\":[]}}" },
+            load_duration = chatCalls == 1 ? 2_000_000_000L : 0L,
+            prompt_eval_count = 100, prompt_eval_duration = 1_000_000_000L,
+            eval_count = 10, eval_duration = 500_000_000L
+        }));
+    });
+    using var client = new HttpClient(handler) { BaseAddress = new Uri("http://127.0.0.1:11434/") };
+    using var runner = new OllamaBenchmark(client, TimeSpan.FromMilliseconds(30),
+        Path.Combine(root, "benchmark-reports"));
+    var report = await runner.RunAsync(pack, "test:tag");
+    Assert(chatCalls == 223 && bypassCalls == 3 && report.Cases.Count == 223,
+        "Each of the 223 forced-model cases must make a real chat call, including status and stubs.");
+    Assert(report.Cases[1].FailureReasons.Any(reason => reason.Contains("Json", StringComparison.OrdinalIgnoreCase)) &&
+        report.Cases[2].FailureReasons.Any(reason => reason.Contains("HTTP 503")) &&
+        report.Cases[3].FailureReasons.Any(reason => reason.Contains("timed out")),
+        "Malformed JSON, HTTP errors and timeouts must retain per-case failures: " +
+        string.Join(" | ", report.Cases.Take(4).Select(item => string.Join("; ", item.FailureReasons))));
+    Assert(report.ColdLoadMs == 2000 && report.Summary.PromptTokensPerSecond == 100 &&
+        report.Summary.GenerationTokensPerSecond == 20 && report.Placement.StartsWith("Mixed") &&
+        report.Quantization == "Q4_K_M" && report.ContextSetting == 4096,
+        "Ollama nanosecond timing or model metadata was calculated incorrectly.");
+    Assert(File.Exists(report.AutoSavePath) && report.Summary.Categories.Count > 0,
+        "The detailed report was not saved with category scores.");
+    using (var saved = JsonDocument.Parse(File.ReadAllText(report.AutoSavePath)))
+        Assert(saved.RootElement.GetProperty("cases").GetArrayLength() == 223,
+            "The exported report is incomplete.");
+
+    var cancelledCalls = 0;
+    using var cancelHandler = new WarmupHandler((request, _) =>
+    {
+        if (request.RequestUri!.AbsolutePath == "/api/chat") cancelledCalls++;
+        return Task.FromResult(request.RequestUri.AbsolutePath switch
+        {
+            "/api/show" => JsonReply("{}"),
+            "/api/generate" => JsonReply("{\"done\":true}"),
+            "/api/ps" => JsonReply("{\"models\":[]}"),
+            _ => JsonReply("{\"done\":true,\"message\":{\"content\":\"{\\\"dialogue\\\":\\\"OK\\\",\\\"relationship\\\":\\\"SKIP\\\",\\\"action\\\":{\\\"type\\\":\\\"NONE\\\"}}\"}}")
+        });
+    });
+    using var cancelClient = new HttpClient(cancelHandler) { BaseAddress = new Uri("http://127.0.0.1:11434/") };
+    using var cancelRunner = new OllamaBenchmark(cancelClient, reportDirectory: Path.Combine(root, "cancelled-reports"));
+    using var cancellation = new CancellationTokenSource();
+    var partial = await cancelRunner.RunAsync(pack, "test:tag", new CallbackProgress<BenchmarkReport>(
+        update => { if (update.Cases.Count == 1) cancellation.Cancel(); }), cancellation.Token);
+    Assert(partial.Cancelled && partial.Cases.Count == 1 && cancelledCalls == 1 &&
+        File.Exists(partial.AutoSavePath), "Cancellation lost the partial report or sent another model request.");
+}
+
+static HttpResponseMessage JsonReply(string content) => new(System.Net.HttpStatusCode.OK)
+{
+    Content = new StringContent(content, Encoding.UTF8, "application/json")
+};
+
 sealed class WarmupHandler(
     Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond)
     : HttpMessageHandler
@@ -500,4 +591,9 @@ sealed class WarmupHandler(
     protected override Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request, CancellationToken cancellationToken) =>
         respond(request, cancellationToken);
+}
+
+sealed class CallbackProgress<T>(Action<T> callback) : IProgress<T>
+{
+    public void Report(T value) => callback(value);
 }

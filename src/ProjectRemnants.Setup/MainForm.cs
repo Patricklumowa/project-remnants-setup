@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
+using ProjectRemnants.Setup.Benchmark;
 using ProjectRemnants.Setup.Install;
 using ProjectRemnants.Setup.Llm;
 
@@ -29,6 +30,7 @@ public sealed class MainForm : Form
     private int _lastProviderIndex;
     private readonly Button _configureLlm = new();
     private readonly Button _disableLlm = new();
+    private readonly Button _benchmarkModel = new();
     private readonly TableLayoutPanel _progressPanel = new();
     private readonly ProgressBar _progress = new();
     private readonly Label _progressStatus = new();
@@ -351,8 +353,10 @@ public sealed class MainForm : Form
         };
         ConfigureButton(_configureLlm, "Configure and Start", ConfigureLlm, true);
         ConfigureButton(_disableLlm, "Disable", DisableLlm);
+        ConfigureButton(_benchmarkModel, "Benchmark selected model", BenchmarkSelectedModel);
         actions.Controls.Add(_configureLlm);
         actions.Controls.Add(_disableLlm);
+        actions.Controls.Add(_benchmarkModel);
         layout.Controls.Add(actions, 1, 8);
 
         _progressPanel.Dock = DockStyle.Fill;
@@ -890,6 +894,7 @@ public sealed class MainForm : Form
 
         _browseCatalog.Visible = !remote;
         _checkModels.Visible = remote;
+        _benchmarkModel.Visible = !remote;
         _modelTip.Visible = !remote && _modelTip.Text.Length != 0;
 
         ApplyModelChoices(remote ? _remoteModelChoices : _ollamaModelChoices, remote);
@@ -1081,6 +1086,43 @@ public sealed class MainForm : Form
         }
     }
 
+    private async void BenchmarkSelectedModel(object? sender, EventArgs eventArgs)
+    {
+        if (_provider.SelectedIndex != 0) return;
+        var model = _model.Text.Trim();
+        if (model.Length == 0) { ShowError("Select a local Ollama model first."); return; }
+        var runningGame = new[] { "ProjectZomboid64", "ProjectZomboid32", "ProjectZomboid" }
+            .SelectMany(Process.GetProcessesByName).ToArray();
+        try
+        {
+            if (runningGame.Length != 0 && MessageBox.Show(this,
+                "Project Zomboid is open. It can consume VRAM and change benchmark timing. Continue anyway?",
+                "Benchmark selected model", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                return;
+        }
+        finally
+        {
+            foreach (var process in runningGame) process.Dispose();
+        }
+        SetBusy(true);
+        try
+        {
+            var models = await _ollama.GetModelsAsync();
+            if (!models.Contains(model, StringComparer.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"{model} is not downloaded in Ollama. Download it before benchmarking.");
+            using var dialog = new BenchmarkForm(model);
+            dialog.ShowDialog(this);
+        }
+        catch (Exception exception)
+        {
+            ShowError(exception.Message);
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+    }
+
     private void LoadSavedLlmSettings()
     {
         var configuration = LlmConfigurationStore.LoadProvider(_userDirectory.Text);
@@ -1114,6 +1156,7 @@ public sealed class MainForm : Form
     {
         _configureLlm.Enabled = !busy;
         _disableLlm.Enabled = !busy;
+        _benchmarkModel.Enabled = !busy;
         _progressPanel.Visible = busy;
         if (busy)
         {
