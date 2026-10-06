@@ -3,6 +3,7 @@ using System.Text.Json;
 using ProjectRemnants.Setup.Benchmark;
 using ProjectRemnants.Setup.Install;
 using ProjectRemnants.Setup.Llm;
+using ProjectRemnants.Setup.Voice;
 
 var root = Path.Combine(Path.GetTempPath(), $"ProjectRemnantsSetup-{Guid.NewGuid():N}");
 Directory.CreateDirectory(root);
@@ -21,6 +22,7 @@ try
     TestModelFit();
     TestCatalogParsing();
     TestRemoteModelDiscovery();
+    await TestVoiceInstaller(root);
     await TestBridgeLifecycle();
     Console.WriteLine("All smoke tests passed.");
     return 0;
@@ -584,6 +586,160 @@ static HttpResponseMessage JsonReply(string content) => new(System.Net.HttpStatu
     Content = new StringContent(content, Encoding.UTF8, "application/json")
 };
 
+static async Task TestVoiceInstaller(string root)
+{
+    var directory = Path.Combine(root, "voice");
+    var engineZip = BuildEngineZip();
+    var engine = new VoiceAsset(
+        "engine.zip", new Uri("https://example.test/engine.zip"), Sha256Hex(engineZip), engineZip.Length);
+    var modelBytes = Encoding.ASCII.GetBytes(new string('m', 4096));
+    var model = new VoiceModel("test", "Test model", "summary", new VoiceAsset(
+        "ggml-test.en.bin", new Uri("https://example.test/ggml-test.en.bin"),
+        Sha256Hex(modelBytes), modelBytes.Length));
+    var requests = new List<string>();
+    var files = new Dictionary<string, byte[]>
+    {
+        [engine.Url.ToString()] = engineZip,
+        [model.Asset.Url.ToString()] = modelBytes
+    };
+    using var http = new HttpClient(new VoiceHandler(files, requests));
+    var installer = new VoiceInstaller(directory, http);
+    Assert(!installer.GetStatus().EngineInstalled, "Voice input should start uninstalled.");
+
+    var percents = new List<int>();
+    await installer.InstallAsync(model, new CallbackProgress<VoiceProgress>(report =>
+    {
+        if (report.Percent is { } percent)
+        {
+            percents.Add(percent);
+        }
+    }), default, engine);
+    var status = installer.GetStatus();
+    Assert(status.EngineInstalled, "The speech engine was not installed.");
+    Assert(status.InstalledModelFiles.SequenceEqual(["ggml-test.en.bin"]), "The model file was not installed.");
+    Assert(status.ActiveModelFile == "ggml-test.en.bin", "The installed model was not selected.");
+    Assert(percents.Count > 0 && percents.Max() == 100, "Download progress did not reach 100 percent.");
+    var bin = Path.Combine(directory, "bin");
+    Assert(File.Exists(Path.Combine(bin, "whisper-server.exe")) && File.Exists(Path.Combine(bin, "whisper.dll"))
+        && File.Exists(Path.Combine(bin, "ggml-cpu-x64.dll")), "Engine files are missing.");
+    Assert(!File.Exists(Path.Combine(bin, "SDL2.dll")) && !File.Exists(Path.Combine(bin, "whisper-cli.exe")),
+        "Unneeded engine files were installed.");
+    Assert(!File.Exists(Path.Combine(directory, "escape.dll")) && !File.Exists(Path.Combine(root, "escape.dll")),
+        "A zip entry escaped the engine folder.");
+    Assert(!Directory.EnumerateFileSystemEntries(directory).Any(path =>
+        Path.GetFileName(path).StartsWith(".bin-", StringComparison.Ordinal)), "Staging folders were left behind.");
+    Assert(File.ReadAllText(Path.Combine(directory, "speech.properties")).Contains("model=ggml-test.en.bin"),
+        "speech.properties does not name the model.");
+    Assert(!File.ReadAllBytes(Path.Combine(directory, "speech.properties")).AsSpan().StartsWith(new byte[] { 0xEF, 0xBB, 0xBF }),
+        "speech.properties has a BOM.");
+
+    var requestsBefore = requests.Count;
+    await installer.InstallAsync(model, null, default, engine);
+    Assert(requests.Count == requestsBefore, "An installed model and engine were downloaded again.");
+
+    File.WriteAllText(Path.Combine(directory, "speech.properties"), "threads=3\r\nmodel=old.bin\r\n");
+    installer.SelectModel(model);
+    var config = File.ReadAllText(Path.Combine(directory, "speech.properties"));
+    Assert(config.Contains("threads=3") && config.Contains("model=ggml-test.en.bin") && !config.Contains("old.bin"),
+        "Selecting a model changed other settings or kept the old model.");
+
+    var corrupt = new VoiceModel("bad", "Bad model", "summary", new VoiceAsset(
+        "ggml-bad.en.bin", new Uri("https://example.test/bad.bin"), new string('0', 64), modelBytes.Length));
+    files[corrupt.Asset.Url.ToString()] = modelBytes;
+    await AssertThrowsAsync<InvalidDataException>(
+        () => installer.InstallAsync(corrupt, null, default, engine), "A corrupt download was accepted.");
+    Assert(!File.Exists(Path.Combine(directory, "models", "ggml-bad.en.bin"))
+        && !File.Exists(Path.Combine(directory, "models", "ggml-bad.en.bin.part")),
+        "A corrupt download left files behind.");
+    Assert(installer.GetStatus().ActiveModelFile == "ggml-test.en.bin", "A failed install changed the active model.");
+
+    var wrongSize = new VoiceModel("short", "Short model", "summary", new VoiceAsset(
+        "ggml-short.en.bin", new Uri("https://example.test/short.bin"), Sha256Hex(modelBytes), modelBytes.Length + 10));
+    files[wrongSize.Asset.Url.ToString()] = modelBytes;
+    await AssertThrowsAsync<InvalidDataException>(
+        () => installer.InstallAsync(wrongSize, null, default, engine), "A download with the wrong size was accepted.");
+
+    installer.Remove();
+    Assert(!Directory.Exists(directory), "Remove did not delete the voice folder.");
+
+    var foreign = Path.Combine(root, "voice-foreign");
+    Directory.CreateDirectory(foreign);
+    File.WriteAllText(Path.Combine(foreign, "keep.txt"), "mine");
+    var foreignInstaller = new VoiceInstaller(foreign, http);
+    await AssertThrowsAsync<InvalidOperationException>(
+        () => foreignInstaller.InstallAsync(model, null, default, engine), "A folder the app does not own was used.");
+    Assert(File.Exists(Path.Combine(foreign, "keep.txt")), "A foreign folder was modified.");
+    Assert(Throws<InvalidOperationException>(() => foreignInstaller.Remove()), "A foreign folder was removed.");
+    Assert(File.Exists(Path.Combine(foreign, "keep.txt")), "A foreign folder lost its files.");
+
+    var missingServer = new VoiceInstaller(Path.Combine(root, "voice-broken"), http);
+    var brokenZip = BuildEngineZip(includeServer: false);
+    var brokenEngine = new VoiceAsset(
+        "broken.zip", new Uri("https://example.test/broken.zip"), Sha256Hex(brokenZip), brokenZip.Length);
+    files[brokenEngine.Url.ToString()] = brokenZip;
+    await AssertThrowsAsync<InvalidDataException>(
+        () => missingServer.InstallAsync(model, null, default, brokenEngine), "An engine package without the server was accepted.");
+    Assert(!missingServer.GetStatus().EngineInstalled, "A broken engine package was installed.");
+}
+
+static byte[] BuildEngineZip(bool includeServer = true)
+{
+    using var stream = new MemoryStream();
+    using (var zip = new System.IO.Compression.ZipArchive(
+        stream, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+    {
+        var names = new List<string>
+        {
+            "Release/whisper.dll", "Release/ggml-cpu-x64.dll", "Release/SDL2.dll",
+            "Release/whisper-cli.exe", "Release/../escape.dll"
+        };
+        if (includeServer)
+        {
+            names.Add("Release/whisper-server.exe");
+        }
+
+        foreach (var name in names)
+        {
+            var entry = zip.CreateEntry(name);
+            using var writer = entry.Open();
+            writer.Write(Encoding.ASCII.GetBytes("binary " + name));
+        }
+    }
+
+    return stream.ToArray();
+}
+
+static string Sha256Hex(byte[] bytes) =>
+    Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+
+static bool Throws<T>(Action action) where T : Exception
+{
+    try
+    {
+        action();
+        return false;
+    }
+    catch (T)
+    {
+        return true;
+    }
+}
+
+static async Task AssertThrowsAsync<T>(Func<Task> action, string message) where T : Exception
+{
+    try
+    {
+        await action();
+    }
+    catch (T)
+    {
+        return;
+    }
+
+    throw new InvalidOperationException(message);
+}
+
+
 sealed class WarmupHandler(
     Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond)
     : HttpMessageHandler
@@ -596,4 +752,27 @@ sealed class WarmupHandler(
 sealed class CallbackProgress<T>(Action<T> callback) : IProgress<T>
 {
     public void Report(T value) => callback(value);
+}
+
+sealed class VoiceHandler(Dictionary<string, byte[]> files, List<string> requests) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var key = request.RequestUri!.ToString();
+        requests.Add(key);
+        if (!files.TryGetValue(key, out var body))
+        {
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.NotFound)
+            {
+                RequestMessage = request
+            });
+        }
+
+        return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(body),
+            RequestMessage = request
+        });
+    }
 }
