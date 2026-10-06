@@ -3,6 +3,7 @@ using System.Drawing.Drawing2D;
 using ProjectRemnants.Setup.Benchmark;
 using ProjectRemnants.Setup.Install;
 using ProjectRemnants.Setup.Llm;
+using ProjectRemnants.Setup.Voice;
 
 namespace ProjectRemnants.Setup;
 
@@ -65,6 +66,7 @@ public sealed class MainForm : Form
         var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new Point(14, 5) };
         tabs.TabPages.Add(BuildSetupPage());
         tabs.TabPages.Add(BuildLlmPage());
+        tabs.TabPages.Add(new VoicePage());
         tabs.SelectedIndexChanged += async (_, _) =>
         {
             _llmPageActive = tabs.SelectedIndex == 1;
