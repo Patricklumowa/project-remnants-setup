@@ -1,17 +1,30 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
-    <UseWindowsForms>true</UseWindowsForms>
+    <TargetFrameworks>net10.0-windows;net10.0</TargetFrameworks>
+    <UseWindowsForms Condition="'$(TargetFramework)' == 'net10.0-windows'">true</UseWindowsForms>
     <AssemblyName>ProjectRemnantsSetup</AssemblyName>
     <RootNamespace>ProjectRemnants.Setup</RootNamespace>
     <Version>0.2.3</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <OutputType Condition="'$(TargetFramework)' == 'net10.0-windows'">WinExe</OutputType>
+    <OutputType Condition="'$(TargetFramework)' == 'net10.0'">Exe</OutputType>
+    <ApplicationManifest Condition="'$(TargetFramework)' == 'net10.0-windows'">app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode Condition="'$(TargetFramework)' == 'net10.0-windows'">PerMonitorV2</ApplicationHighDpiMode>
     <DebugType>embedded</DebugType>
+    <DefineConstants Condition="'$(TargetFramework)' == 'net10.0-windows'">$(DefineConstants);WINDOWS</DefineConstants>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="Benchmark\forced-model-pack-v1.json" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <Compile Remove="MainForm.cs" />
+    <Compile Remove="Elevation.cs" />
+    <Compile Remove="Benchmark\BenchmarkForm.cs" />
+    <Compile Remove="Llm\ModelCatalogForm.cs" />
+    <Compile Remove="Voice\VoicePage.cs" />
   </ItemGroup>
 </Project>

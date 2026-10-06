@@ -11,23 +11,31 @@ public static class JavaAgentDependencies
     private static readonly UTF8Encoding Utf8WithoutBom = new(false);
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private static readonly string[] RequiredBinFiles =
-    [
-        "instrument.dll",
-        "java.dll",
-        "jli.dll",
-        "vcruntime140.dll",
-        "api-ms-win-crt-convert-l1-1-0.dll",
-        "api-ms-win-crt-heap-l1-1-0.dll",
-        "api-ms-win-crt-runtime-l1-1-0.dll",
-        "api-ms-win-crt-stdio-l1-1-0.dll",
-        "api-ms-win-crt-string-l1-1-0.dll"
-    ];
+        OperatingSystem.IsWindows()
+            ? [
+                "instrument.dll",
+                "java.dll",
+                "jli.dll",
+                "vcruntime140.dll",
+                "api-ms-win-crt-convert-l1-1-0.dll",
+                "api-ms-win-crt-heap-l1-1-0.dll",
+                "api-ms-win-crt-runtime-l1-1-0.dll",
+                "api-ms-win-crt-stdio-l1-1-0.dll",
+                "api-ms-win-crt-string-l1-1-0.dll"
+            ]
+            : [
+                "libinstrument.so",
+                "libjava.so",
+                "libjli.so"
+            ];
     private static readonly string[] OptionalBinFiles =
-    [
-        "msvcp140.dll",
-        "ucrtbase.dll",
-        "vcruntime140_1.dll"
-    ];
+        OperatingSystem.IsWindows()
+            ? [
+                "msvcp140.dll",
+                "ucrtbase.dll",
+                "vcruntime140_1.dll"
+            ]
+            : [];
 
     public static int Install(string configPath)
     {
@@ -174,6 +182,8 @@ public static class JavaAgentDependencies
         {
             "NPCFW.jar",
             "NPCFWNative.dll",
+            "libNPCFWNative.so",
+            "NPCFWNative.so",
             "NPCFW_combat_log.txt",
             "NPCFW_vehicle_entry_debug.log"
         })
@@ -218,20 +228,28 @@ public static class JavaAgentDependencies
         string gameDirectory,
         bool requireCoreFiles)
     {
-        var bin = Path.Combine(gameDirectory, "jre64", "bin");
+        var bin = OperatingSystem.IsWindows()
+            ? Path.Combine(gameDirectory, "jre64", "bin")
+            : Path.Combine(gameDirectory, "jre64", "lib");
         var dependencies = new Dictionary<string, Dependency>(StringComparer.OrdinalIgnoreCase);
         foreach (var name in RequiredBinFiles)
         {
             Add(dependencies, Path.Combine(bin, name), name, required: requireCoreFiles);
         }
 
-        Add(dependencies, Path.Combine(bin, "server", "jvm.dll"), "jvm.dll", required: requireCoreFiles);
+        Add(
+            dependencies,
+            OperatingSystem.IsWindows()
+                ? Path.Combine(bin, "server", "jvm.dll")
+                : Path.Combine(bin, "server", "libjvm.so"),
+            OperatingSystem.IsWindows() ? "jvm.dll" : "libjvm.so",
+            required: requireCoreFiles);
         foreach (var name in OptionalBinFiles)
         {
             Add(dependencies, Path.Combine(bin, name), name, required: false);
         }
 
-        if (Directory.Exists(bin))
+        if (Directory.Exists(bin) && OperatingSystem.IsWindows())
         {
             foreach (var path in Directory.EnumerateFiles(
                 bin, "api-ms-win-crt-*.dll", SearchOption.TopDirectoryOnly))
@@ -250,13 +268,25 @@ public static class JavaAgentDependencies
 
     private static bool HasCopiedCoreDependencies(string gameDirectory)
     {
-        var bin = Path.Combine(gameDirectory, "jre64", "bin");
+        if (OperatingSystem.IsWindows())
+        {
+            var bin = Path.Combine(gameDirectory, "jre64", "bin");
+            return new[]
+            {
+                (Path.Combine(bin, "instrument.dll"), Path.Combine(gameDirectory, "instrument.dll")),
+                (Path.Combine(bin, "java.dll"), Path.Combine(gameDirectory, "java.dll")),
+                (Path.Combine(bin, "jli.dll"), Path.Combine(gameDirectory, "jli.dll")),
+                (Path.Combine(bin, "server", "jvm.dll"), Path.Combine(gameDirectory, "jvm.dll"))
+            }.All(pair => File.Exists(pair.Item1) && File.Exists(pair.Item2) && FilesMatch(pair.Item1, pair.Item2));
+        }
+
+        var lib = Path.Combine(gameDirectory, "jre64", "lib");
         return new[]
         {
-            (Path.Combine(bin, "instrument.dll"), Path.Combine(gameDirectory, "instrument.dll")),
-            (Path.Combine(bin, "java.dll"), Path.Combine(gameDirectory, "java.dll")),
-            (Path.Combine(bin, "jli.dll"), Path.Combine(gameDirectory, "jli.dll")),
-            (Path.Combine(bin, "server", "jvm.dll"), Path.Combine(gameDirectory, "jvm.dll"))
+            (Path.Combine(lib, "libinstrument.so"), Path.Combine(gameDirectory, "libinstrument.so")),
+            (Path.Combine(lib, "libjava.so"), Path.Combine(gameDirectory, "libjava.so")),
+            (Path.Combine(lib, "libjli.so"), Path.Combine(gameDirectory, "libjli.so")),
+            (Path.Combine(lib, "server", "libjvm.so"), Path.Combine(gameDirectory, "libjvm.so"))
         }.All(pair => File.Exists(pair.Item1) && File.Exists(pair.Item2) && FilesMatch(pair.Item1, pair.Item2));
     }
 
@@ -284,7 +314,7 @@ public static class JavaAgentDependencies
         {
             if (required)
             {
-                throw new FileNotFoundException($"Missing required Java runtime DLL: {name}", source);
+                throw new FileNotFoundException($"Missing required Java runtime library: {name}", source);
             }
 
             return;
@@ -310,7 +340,8 @@ public static class JavaAgentDependencies
             ?? throw new InvalidDataException("The Project Remnants install manifest is invalid.");
         if (manifest.Files.Any(entry =>
             entry.Name != Path.GetFileName(entry.Name) ||
-            !entry.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ||
+            !entry.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) &&
+            !entry.Name.EndsWith(".so", StringComparison.OrdinalIgnoreCase) ||
             entry.Created == (entry.Backup is not null) ||
             entry.Backup is not null && entry.Backup != Path.GetFileName(entry.Backup)) ||
             manifest.Files.Select(entry => entry.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() !=

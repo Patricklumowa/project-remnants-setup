@@ -67,12 +67,23 @@ public static class AgentLocator
     {
         try
         {
-            var common = Directory.GetParent(Path.GetFullPath(gameDirectory));
-            var steamApps = common?.Parent;
-            var workshop = steamApps is null
-                ? null
-                : Path.Combine(steamApps.FullName, "workshop", "content", "108600");
-            if (workshop is null || !Directory.Exists(workshop))
+            // Ascend to the steamapps directory: on Windows the game sits
+            // two levels below it, on Linux three (projectzomboid/ nesting).
+            DirectoryInfo? ancestor = new(Path.GetFullPath(gameDirectory));
+            string? workshop = null;
+            for (var depth = 0; depth < 5 && ancestor is not null; depth++)
+            {
+                var candidate = Path.Combine(ancestor.FullName, "workshop", "content", "108600");
+                if (Directory.Exists(candidate))
+                {
+                    workshop = candidate;
+                    break;
+                }
+
+                ancestor = ancestor.Parent;
+            }
+
+            if (workshop is null)
             {
                 return null;
             }

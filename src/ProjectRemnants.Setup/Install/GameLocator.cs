@@ -29,6 +29,11 @@ public static class GameLocator
 
     private static void TryRegistryInstall(List<GameInstall> found, HashSet<string> seen)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         try
         {
             using var key = Registry.LocalMachine.OpenSubKey(
@@ -65,48 +70,84 @@ public static class GameLocator
     private static void TryRegisteredSteamLibraries(List<GameInstall> found, HashSet<string> seen)
     {
         string? steamPath = null;
-        try
+        if (OperatingSystem.IsWindows())
         {
-            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam");
-            steamPath = key?.GetValue("SteamPath") as string;
-        }
-        catch (Exception) when (OperatingSystem.IsWindows())
-        {
+            try
+            {
+                using var key = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam");
+                steamPath = key?.GetValue("SteamPath") as string;
+            }
+            catch (Exception)
+            {
+            }
         }
 
-        if (string.IsNullOrWhiteSpace(steamPath))
+        var libraries = OperatingSystem.IsWindows()
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.Ordinal);
+        if (!string.IsNullOrWhiteSpace(steamPath))
+        {
+            libraries.Add(Path.GetFullPath(steamPath));
+        }
+        else if (!OperatingSystem.IsWindows())
+        {
+            foreach (var candidate in UnixSteamRoots())
+            {
+                if (Directory.Exists(candidate))
+                {
+                    libraries.Add(Path.GetFullPath(candidate));
+                }
+            }
+        }
+
+        if (libraries.Count == 0)
         {
             return;
         }
 
-        var libraries = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        foreach (var root in libraries.ToArray())
         {
-            Path.GetFullPath(steamPath)
-        };
-        var libraryFile = Path.Combine(steamPath, "steamapps", "libraryfolders.vdf");
-        try
-        {
-            if (File.Exists(libraryFile))
+            var libraryFile = Path.Combine(root, "steamapps", "libraryfolders.vdf");
+            try
             {
-                var text = File.ReadAllText(libraryFile);
-                foreach (Match match in LibraryPathPattern.Matches(text))
+                if (File.Exists(libraryFile))
                 {
-                    var path = match.Groups["value"].Value.Replace("\\\\", "\\");
-                    if (!string.IsNullOrWhiteSpace(path))
+                    var text = File.ReadAllText(libraryFile);
+                    foreach (Match match in LibraryPathPattern.Matches(text))
                     {
-                        libraries.Add(Path.GetFullPath(path));
+                        var path = match.Groups["value"].Value.Replace("\\\\", "/");
+                        if (!string.IsNullOrWhiteSpace(path))
+                        {
+                            libraries.Add(Path.GetFullPath(path));
+                        }
                     }
                 }
             }
-        }
-        catch (Exception)
-        {
+            catch (Exception)
+            {
+            }
         }
 
         foreach (var library in libraries)
         {
             TrySteamApps(Path.Combine(library, "steamapps"), "Steam library", found, seen);
         }
+    }
+
+    private static IEnumerable<string> UnixSteamRoots()
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrEmpty(home))
+        {
+            yield break;
+        }
+
+        yield return Path.Combine(home, ".steam", "steam");
+        yield return Path.Combine(home, ".steam", "root");
+        yield return Path.Combine(home, ".local", "share", "Steam");
+        yield return Path.Combine(home, ".var", "app", "com.valvesoftware.Steam", ".local", "share", "Steam");
+        yield return Path.Combine(home, "snap", "steam", "common", ".local", "share", "Steam");
+        yield return Path.Combine(home, "snap", "steam", "common", ".steam", "steam");
     }
 
     private static void TrySteamApps(
@@ -148,10 +189,21 @@ public static class GameLocator
         try
         {
             var fullDirectory = Path.GetFullPath(directory.Trim().Trim('"'));
-            var configPath = Path.Combine(fullDirectory, ConfigName);
-            if (File.Exists(configPath) && seen.Add(configPath))
+            // On Linux the launcher config lives in the projectzomboid/
+            // subdirectory; on Windows it sits next to the executable.
+            foreach (var configPath in new[]
             {
-                found.Add(new GameInstall(fullDirectory, configPath, source));
+                Path.Combine(fullDirectory, ConfigName),
+                Path.Combine(fullDirectory, "projectzomboid", ConfigName)
+            })
+            {
+                if (File.Exists(configPath) && seen.Add(configPath))
+                {
+                    found.Add(new GameInstall(
+                        Path.GetDirectoryName(configPath)!,
+                        configPath,
+                        source));
+                }
             }
         }
         catch (Exception)

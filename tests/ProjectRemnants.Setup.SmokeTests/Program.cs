@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
 using ProjectRemnants.Setup.Benchmark;
@@ -23,6 +24,7 @@ try
     TestCatalogParsing();
     TestRemoteModelDiscovery();
     await TestVoiceInstaller(root);
+    TestTarValidation();
     await TestBridgeLifecycle();
     Console.WriteLine("All smoke tests passed.");
     return 0;
@@ -43,7 +45,8 @@ static void TestConfigInstall(string root)
     var agent = Path.Combine(root, "NPCFW.jar");
     File.WriteAllText(agent, "test");
     CreateJavaRuntime(game);
-    var originalJava = Path.Combine(game, "java.dll");
+    var javaName = JavaLibrary("java.dll");
+    var originalJava = Path.Combine(game, javaName);
     File.WriteAllText(originalJava, "original-root-java");
     File.WriteAllText(config, """
         {
@@ -62,8 +65,8 @@ static void TestConfigInstall(string root)
     Assert(status.Installed, "The Java agent was not installed.");
     Assert(status.ObsoleteEntries == 0, "An obsolete loader entry remains.");
     Assert(File.Exists(config + ".npcfw-backup"), "The config backup was not created.");
-    Assert(File.ReadAllText(originalJava) == "runtime-java.dll", "A Java runtime DLL was not copied.");
-    Assert(File.Exists(Path.Combine(game, "instrument.dll")), "A missing Java runtime DLL was not copied.");
+    Assert(File.ReadAllText(originalJava) == $"runtime-{javaName}", "A Java runtime library was not copied.");
+    Assert(File.Exists(Path.Combine(game, JavaLibrary("instrument.dll"))), "A missing Java runtime library was not copied.");
     Assert(File.Exists(Path.Combine(game, ".project-remnants-files.json")),
         "The copied-file manifest was not created.");
     ProjectZomboidConfig.Install(config, agent);
@@ -75,8 +78,8 @@ static void TestConfigInstall(string root)
     Assert(File.ReadAllText(config).Contains("-Xmx4096m", StringComparison.Ordinal),
         "An unrelated game setting was not restored.");
     Assert(!File.Exists(config + ".npcfw-backup"), "The config backup was not removed.");
-    Assert(File.ReadAllText(originalJava) == "original-root-java", "A replaced DLL was not restored.");
-    Assert(!File.Exists(Path.Combine(game, "instrument.dll")), "A copied DLL was not removed.");
+    Assert(File.ReadAllText(originalJava) == "original-root-java", "A replaced library was not restored.");
+    Assert(!File.Exists(Path.Combine(game, JavaLibrary("instrument.dll"))), "A copied library was not removed.");
     Assert(!File.Exists(Path.Combine(game, ".project-remnants-files.json")),
         "The copied-file manifest was not removed.");
     Assert(!Directory.Exists(Path.Combine(game, ".project-remnants-backups")),
@@ -134,16 +137,19 @@ static void TestUnmarkedLegacyDllCleanup(string root)
           "vmArgs": ["-javaagent:C:/Legacy/NPCFW.jar"]
         }
         """);
-    var bin = Path.Combine(game, "jre64", "bin");
-    File.Copy(Path.Combine(bin, "instrument.dll"), Path.Combine(game, "instrument.dll"));
-    File.Copy(Path.Combine(bin, "java.dll"), Path.Combine(game, "java.dll"));
-    File.Copy(Path.Combine(bin, "jli.dll"), Path.Combine(game, "jli.dll"));
-    File.Copy(Path.Combine(bin, "server", "jvm.dll"), Path.Combine(game, "jvm.dll"));
+    var bin = JavaLibraryDirectory(game);
+    var jvmRelative = OperatingSystem.IsWindows()
+        ? Path.Combine("server", "jvm.dll")
+        : Path.Combine("server", "libjvm.so");
+    File.Copy(Path.Combine(bin, JavaLibrary("instrument.dll")), Path.Combine(game, JavaLibrary("instrument.dll")));
+    File.Copy(Path.Combine(bin, JavaLibrary("java.dll")), Path.Combine(game, JavaLibrary("java.dll")));
+    File.Copy(Path.Combine(bin, JavaLibrary("jli.dll")), Path.Combine(game, JavaLibrary("jli.dll")));
+    File.Copy(Path.Combine(bin, jvmRelative), Path.Combine(game, JavaLibrary("jvm.dll")));
 
     ProjectZomboidConfig.Uninstall(config);
-    Assert(!File.Exists(Path.Combine(game, "instrument.dll")),
-        "An unmarked legacy DLL copy remains.");
-    Assert(!File.Exists(Path.Combine(game, "jvm.dll")),
+    Assert(!File.Exists(Path.Combine(game, JavaLibrary("instrument.dll"))),
+        "An unmarked legacy library copy remains.");
+    Assert(!File.Exists(Path.Combine(game, JavaLibrary("jvm.dll"))),
         "An unmarked legacy JVM copy remains.");
 }
 
@@ -165,10 +171,11 @@ static void TestLegacyUninstall(string root)
         }
         """);
 
-    var bin = Path.Combine(game, "jre64", "bin");
-    File.Copy(Path.Combine(bin, "instrument.dll"), Path.Combine(game, "instrument.dll"));
-    File.Copy(Path.Combine(bin, "java.dll"), Path.Combine(game, "java.dll"));
-    var javaBackup = Path.Combine(game, "java.dll.ProjectRemnantsBackup.20250101-000000");
+    var bin = JavaLibraryDirectory(game);
+    File.Copy(Path.Combine(bin, JavaLibrary("instrument.dll")), Path.Combine(game, JavaLibrary("instrument.dll")));
+    var javaLibrary = JavaLibrary("java.dll");
+    File.Copy(Path.Combine(bin, javaLibrary), Path.Combine(game, javaLibrary));
+    var javaBackup = Path.Combine(game, $"{javaLibrary}.ProjectRemnantsBackup.20250101-000000");
     File.WriteAllText(javaBackup, "original-java");
     File.WriteAllText(Path.Combine(game, "NPCFW_combat_log.txt"), "log");
     File.WriteAllText(Path.Combine(game, "unrelated.txt"), "keep");
@@ -179,10 +186,10 @@ static void TestLegacyUninstall(string root)
     ProjectZomboidConfig.Uninstall(config);
     Assert(!ProjectZomboidConfig.Inspect(config).Installed, "The legacy Java agent remains.");
     Assert(!File.Exists(legacyBackup), "The legacy JSON backup remains.");
-    Assert(!File.Exists(Path.Combine(game, "instrument.dll")), "A legacy copied DLL remains.");
-    Assert(File.ReadAllText(Path.Combine(game, "java.dll")) == "original-java",
-        "A legacy DLL backup was not restored.");
-    Assert(!File.Exists(javaBackup), "A legacy DLL backup remains.");
+    Assert(!File.Exists(Path.Combine(game, JavaLibrary("instrument.dll"))), "A legacy copied library remains.");
+    Assert(File.ReadAllText(Path.Combine(game, JavaLibrary("java.dll"))) == "original-java",
+        "A legacy library backup was not restored.");
+    Assert(!File.Exists(javaBackup), "A legacy library backup remains.");
     Assert(!File.Exists(Path.Combine(game, "NPCFW_combat_log.txt")), "A legacy log remains.");
     Assert(!Directory.Exists(driveRecords), "The driving-record directory remains.");
     Assert(File.Exists(Path.Combine(game, "unrelated.txt")), "An unrelated game file was removed.");
@@ -419,27 +426,51 @@ static async Task TestBridgeLifecycle()
 
 static void CreateJavaRuntime(string game)
 {
-    var bin = Path.Combine(game, "jre64", "bin");
+    var windows = OperatingSystem.IsWindows();
+    var bin = windows
+        ? Path.Combine(game, "jre64", "bin")
+        : Path.Combine(game, "jre64", "lib");
     var server = Path.Combine(bin, "server");
     Directory.CreateDirectory(server);
-    foreach (var name in new[]
-    {
-        "instrument.dll",
-        "java.dll",
-        "jli.dll",
-        "vcruntime140.dll",
-        "api-ms-win-crt-convert-l1-1-0.dll",
-        "api-ms-win-crt-heap-l1-1-0.dll",
-        "api-ms-win-crt-runtime-l1-1-0.dll",
-        "api-ms-win-crt-stdio-l1-1-0.dll",
-        "api-ms-win-crt-string-l1-1-0.dll"
-    })
+    foreach (var name in windows
+        ? new[]
+        {
+            "instrument.dll",
+            "java.dll",
+            "jli.dll",
+            "vcruntime140.dll",
+            "api-ms-win-crt-convert-l1-1-0.dll",
+            "api-ms-win-crt-heap-l1-1-0.dll",
+            "api-ms-win-crt-runtime-l1-1-0.dll",
+            "api-ms-win-crt-stdio-l1-1-0.dll",
+            "api-ms-win-crt-string-l1-1-0.dll"
+        }
+        : ["libinstrument.so", "libjava.so", "libjli.so"])
     {
         File.WriteAllText(Path.Combine(bin, name), $"runtime-{name}");
     }
 
-    File.WriteAllText(Path.Combine(server, "jvm.dll"), "runtime-jvm.dll");
+    File.WriteAllText(
+        Path.Combine(server, windows ? "jvm.dll" : "libjvm.so"),
+        windows ? "runtime-jvm.dll" : "runtime-libjvm.so");
 }
+
+static string JavaLibrary(string name) =>
+    OperatingSystem.IsWindows()
+        ? name
+        : name switch
+        {
+            "instrument.dll" => "libinstrument.so",
+            "java.dll" => "libjava.so",
+            "jli.dll" => "libjli.so",
+            "jvm.dll" => "libjvm.so",
+            _ => throw new ArgumentOutOfRangeException(nameof(name))
+        };
+
+static string JavaLibraryDirectory(string game) =>
+    OperatingSystem.IsWindows()
+        ? Path.Combine(game, "jre64", "bin")
+        : Path.Combine(game, "jre64", "lib");
 
 static void Assert(bool condition, string message)
 {
@@ -620,11 +651,16 @@ static async Task TestVoiceInstaller(string root)
     Assert(status.ActiveModelFile == "ggml-test.en.bin", "The installed model was not selected.");
     Assert(percents.Count > 0 && percents.Max() == 100, "Download progress did not reach 100 percent.");
     var bin = Path.Combine(directory, "bin");
-    Assert(File.Exists(Path.Combine(bin, "whisper-server.exe")) && File.Exists(Path.Combine(bin, "whisper.dll"))
-        && File.Exists(Path.Combine(bin, "ggml-cpu-x64.dll")), "Engine files are missing.");
-    Assert(!File.Exists(Path.Combine(bin, "SDL2.dll")) && !File.Exists(Path.Combine(bin, "whisper-cli.exe")),
+    var windows = OperatingSystem.IsWindows();
+    Assert(File.Exists(Path.Combine(bin, VoiceInstaller.ServerName)) &&
+        File.Exists(Path.Combine(bin, windows ? "whisper.dll" : "libwhisper.so"))
+        && File.Exists(Path.Combine(bin, windows ? "ggml-cpu-x64.dll" : "libggml-cpu-x64.so")),
+        "Engine files are missing.");
+    Assert(!File.Exists(Path.Combine(bin, windows ? "SDL2.dll" : "libSDL2.so")) &&
+        !File.Exists(Path.Combine(bin, windows ? "whisper-cli.exe" : "whisper-cli")),
         "Unneeded engine files were installed.");
-    Assert(!File.Exists(Path.Combine(directory, "escape.dll")) && !File.Exists(Path.Combine(root, "escape.dll")),
+    Assert(!File.Exists(Path.Combine(directory, windows ? "escape.dll" : "escape.so")) &&
+        !File.Exists(Path.Combine(root, windows ? "escape.dll" : "escape.so")),
         "A zip entry escaped the engine folder.");
     Assert(!Directory.EnumerateFileSystemEntries(directory).Any(path =>
         Path.GetFileName(path).StartsWith(".bin-", StringComparison.Ordinal)), "Staging folders were left behind.");
@@ -688,14 +724,21 @@ static byte[] BuildEngineZip(bool includeServer = true)
     using (var zip = new System.IO.Compression.ZipArchive(
         stream, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
     {
-        var names = new List<string>
-        {
-            "Release/whisper.dll", "Release/ggml-cpu-x64.dll", "Release/SDL2.dll",
-            "Release/whisper-cli.exe", "Release/../escape.dll"
-        };
+        var windows = OperatingSystem.IsWindows();
+        var names = windows
+            ? new List<string>
+            {
+                "Release/whisper.dll", "Release/ggml-cpu-x64.dll", "Release/SDL2.dll",
+                "Release/whisper-cli.exe", "Release/../escape.dll"
+            }
+            : new List<string>
+            {
+                "Release/libwhisper.so", "Release/libggml-cpu-x64.so", "Release/libSDL2.so",
+                "Release/whisper-cli", "Release/../escape.so"
+            };
         if (includeServer)
         {
-            names.Add("Release/whisper-server.exe");
+            names.Add(windows ? "Release/whisper-server.exe" : "Release/whisper-server");
         }
 
         foreach (var name in names)
@@ -711,6 +754,63 @@ static byte[] BuildEngineZip(bool includeServer = true)
 
 static string Sha256Hex(byte[] bytes) =>
     Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+
+static void TestTarValidation()
+{
+    ValidateTarGz(BuildEngineTarGz([
+        ("pkg/libfoo.so.1.9.4", null),
+        ("pkg/libfoo.so.1", "libfoo.so.1.9.4"),
+    ]));
+
+    Assert(Throws<InvalidDataException>(() =>
+        ValidateTarGz(BuildEngineTarGz([("pkg/evil", "/etc/passwd")]))),
+        "A tar link with an absolute target was accepted.");
+
+    Assert(Throws<InvalidDataException>(() =>
+        ValidateTarGz(BuildEngineTarGz([("pkg/../../escape.so", null)]))),
+        "A tar entry escaping the folder was accepted.");
+}
+
+static void ValidateTarGz(byte[] archive)
+{
+    using var stream = new MemoryStream(archive);
+    using var gzip = new GZipStream(stream, CompressionMode.Decompress);
+    VoiceInstaller.ValidateTarEntries(gzip, default);
+}
+
+static byte[] BuildEngineTarGz((string Name, string? Link)[] entries)
+{
+    using var stream = new MemoryStream();
+    using (var gzip = new System.IO.Compression.GZipStream(
+        stream, CompressionLevel.Fastest, leaveOpen: true))
+    using (var tar = new System.Formats.Tar.TarWriter(
+        gzip, System.Formats.Tar.TarEntryFormat.Pax, leaveOpen: true))
+    {
+        foreach (var (name, link) in entries)
+        {
+            if (link is null)
+            {
+                using var source = new MemoryStream(Encoding.ASCII.GetBytes("binary " + name));
+                var file = new System.Formats.Tar.PaxTarEntry(
+                    System.Formats.Tar.TarEntryType.RegularFile, name)
+                {
+                    DataStream = source
+                };
+                tar.WriteEntry(file);
+            }
+            else
+            {
+                tar.WriteEntry(new System.Formats.Tar.PaxTarEntry(
+                    System.Formats.Tar.TarEntryType.SymbolicLink, name)
+                {
+                    LinkName = link
+                });
+            }
+        }
+    }
+
+    return stream.ToArray();
+}
 
 static bool Throws<T>(Action action) where T : Exception
 {
