@@ -25,6 +25,7 @@ try
     TestRemoteModelDiscovery();
     await TestVoiceInstaller(root);
     TestTarValidation();
+    TestLlamaModelName();
     await TestBridgeLifecycle();
     Console.WriteLine("All smoke tests passed.");
     return 0;
@@ -769,6 +770,20 @@ static void TestTarValidation()
     Assert(Throws<InvalidDataException>(() =>
         ValidateTarGz(BuildEngineTarGz([("pkg/../../escape.so", null)]))),
         "A tar entry escaping the folder was accepted.");
+}
+
+static void TestLlamaModelName()
+{
+    Assert(LlamaCppDriver.DisplayModelName("llama3.2:3b", "/models/other.gguf") == "llama3.2:3b",
+        "A valid served model name was not kept.");
+    Assert(LlamaCppDriver.DisplayModelName(
+            "/home/furq/AI/models/Qwen2.5-3B-Instruct/qwen2.5-3b-instruct-q8_0.gguf",
+            "/home/furq/AI/models/Qwen2.5-3B-Instruct/qwen2.5-3b-instruct-q8_0.gguf") ==
+        "qwen2.5-3b-instruct-q8_0",
+        "An absolute model path was not reduced to its file name.");
+    Assert(Throws<InvalidOperationException>(() =>
+        LlamaCppDriver.DisplayModelName("  ", "/models/!!!.gguf")),
+        "An unusable model file name was accepted.");
 }
 
 static void ValidateTarGz(byte[] archive)

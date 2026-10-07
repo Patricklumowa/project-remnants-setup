@@ -1131,10 +1131,8 @@ public sealed class MainForm : Form
 
         UpdateProgress(new OllamaProgress("Starting llama-server"));
         await _llama.EnsureServerAsync(gguf, new Progress<OllamaProgress>(UpdateProgress));
-        var servedModel = await _llama.GetServedModelNameAsync();
-        servedModel = string.IsNullOrWhiteSpace(servedModel)
-            ? Path.GetFileNameWithoutExtension(gguf)
-            : servedModel;
+        var servedModel = LlamaCppDriver.DisplayModelName(
+            await _llama.GetServedModelNameAsync(), gguf);
         await _llama.WarmModelAsync(servedModel, new Progress<OllamaProgress>(UpdateProgress));
         var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
         LlmConfigurationStore.SaveOpenAiBridge(

@@ -174,8 +174,9 @@ internal static class CommandLine
 
                     Console.WriteLine($"Loading {Path.GetFileName(ggufPath)} with llama-server...");
                     llamaDriver.EnsureServerAsync(ggufPath).GetAwaiter().GetResult();
-                    var servedModel = llamaDriver.GetServedModelNameAsync().GetAwaiter().GetResult()
-                        ?? Path.GetFileNameWithoutExtension(ggufPath);
+                    var servedModel = LlamaCppDriver.DisplayModelName(
+                        llamaDriver.GetServedModelNameAsync().GetAwaiter().GetResult(),
+                        ggufPath);
                     var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
                     LlmConfigurationStore.SaveOpenAiBridge(llamaUserDir, servedModel, llamaDriver.Endpoint, token);
                     Console.WriteLine($"llama.cpp is serving '{servedModel}' at {llamaDriver.Endpoint}");

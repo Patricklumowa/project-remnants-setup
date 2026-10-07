@@ -26,6 +26,28 @@ public sealed class LlamaCppDriver : IAsyncDisposable
     public bool OwnsServer => _ownedServer is { HasExited: false };
     public string Endpoint => $"http://127.0.0.1:{DefaultPort}/v1/chat/completions";
 
+    public static string DisplayModelName(string? servedName, string ggufPath)
+    {
+        foreach (var candidate in new[]
+        {
+            servedName?.Trim(),
+            Path.GetFileNameWithoutExtension(ggufPath)?.Trim()
+        })
+        {
+            if (!string.IsNullOrEmpty(candidate) &&
+                candidate.Length <= 200 &&
+                System.Text.RegularExpressions.Regex.IsMatch(
+                    candidate, "^[A-Za-z0-9][A-Za-z0-9._:/()\\-]{0,199}$"))
+            {
+                return candidate;
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"The model file name {Path.GetFileName(ggufPath)} is not accepted by the mod. " +
+            "Rename it to letters, digits, dots, dashes or underscores and try again.");
+    }
+
     public static string ExecutableFileName =>
         OperatingSystem.IsWindows() ? "llama-server.exe" : "llama-server";
 
