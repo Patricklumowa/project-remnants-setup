@@ -207,7 +207,7 @@ public static class ProjectZomboidConfig
     private static bool IsObsoleteNpcfwArgument(string argument) =>
         argument.Equals("-agentlib:zbNative", StringComparison.OrdinalIgnoreCase) ||
         argument.StartsWith("-agentpath:", StringComparison.OrdinalIgnoreCase) &&
-        argument.Contains("NPCFWNative.dll", StringComparison.OrdinalIgnoreCase);
+        argument.Contains("NPCFWNative", StringComparison.OrdinalIgnoreCase);
 
     private static string NormalizeAgentPath(string path) =>
         Path.GetFullPath(path).Replace('\\', '/');

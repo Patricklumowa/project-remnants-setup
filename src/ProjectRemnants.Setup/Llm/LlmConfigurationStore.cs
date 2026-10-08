@@ -166,6 +166,17 @@ public static class LlmConfigurationStore
         {
             File.WriteAllText(temporary, value + Environment.NewLine, Utf8WithoutBom);
             File.Move(temporary, path, overwrite: true);
+            if (!OperatingSystem.IsWindows())
+            {
+                try
+                {
+                    File.SetUnixFileMode(path,
+                        UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                }
+                catch (Exception)
+                {
+                }
+            }
         }
         finally
         {
@@ -208,11 +219,21 @@ public static class LlmConfigurationStore
         return value;
     }
 
+    // On non-Windows platforms DPAPI is unavailable. The profile file is
+    // written with owner-only permissions (see WriteText) instead.
     private static byte[] Protect(byte[] value) =>
+#if WINDOWS
         ProtectedData.Protect(value, null, DataProtectionScope.CurrentUser);
+#else
+        value;
+#endif
 
     private static byte[] Unprotect(byte[] value) =>
+#if WINDOWS
         ProtectedData.Unprotect(value, null, DataProtectionScope.CurrentUser);
+#else
+        value;
+#endif
 
     private static void DeleteIfPresent(string path)
     {

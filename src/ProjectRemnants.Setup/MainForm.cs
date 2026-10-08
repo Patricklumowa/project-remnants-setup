@@ -24,6 +24,7 @@ public sealed class MainForm : Form
     private FlowLayoutPanel? _modelTrailing;
     private readonly Button _browseCatalog = new();
     private readonly Button _checkModels = new();
+    private readonly Button _browseGguf = new();
     private IReadOnlyList<string> _ollamaModelChoices = [];
     private IReadOnlyList<string> _remoteModelChoices = [];
     private string _ollamaSelection = "llama3.2:3b";
@@ -44,6 +45,8 @@ public sealed class MainForm : Form
     private readonly ToolTip _toolTip = new();
     private readonly OllamaDriver _ollama = new();
     private readonly RemoteApiBridge _bridge = new();
+    private readonly LlamaCppDriver _llama = new();
+    private string _llamaSelection = string.Empty;
     private bool _allowClose;
     private bool _checkingOllama;
     private bool _llmPageActive;
@@ -301,7 +304,7 @@ public sealed class MainForm : Form
         AddPathRow(layout, 1, "Zomboid folder", _userDirectory, BrowseUserDirectory);
 
         _provider.DropDownStyle = ComboBoxStyle.DropDownList;
-        _provider.Items.AddRange(["Local Ollama", "OpenAI-compatible API"]);
+        _provider.Items.AddRange(["Local Ollama", "OpenAI-compatible API", "Local llama.cpp"]);
         _provider.SelectedIndex = 0;
         _provider.SelectedIndexChanged += ProviderChanged;
         AddField(layout, 2, "Provider", _provider);
@@ -324,6 +327,10 @@ public sealed class MainForm : Form
         };
         _modelTrailing.Controls.Add(_browseCatalog);
         _modelTrailing.Controls.Add(_checkModels);
+        ConfigureButton(_browseGguf, "Browse .gguf...", BrowseGguf);
+        _browseGguf.Margin = new Padding(8, 0, 0, 0);
+        _browseGguf.Visible = false;
+        _modelTrailing.Controls.Add(_browseGguf);
         AddField(layout, 3, "Model", _model, _modelTrailing);
 
         _gpuStatus.AutoSize = true;
@@ -593,6 +600,7 @@ public sealed class MainForm : Form
             await _bridge.StopAsync();
             await _ollama.UnloadModelAsync(_model.Text);
             await _ollama.StopOwnedServerAsync();
+            await _llama.StopOwnedServerAsync();
             if (!RunInstallerMutation(
                 () => ProjectZomboidConfig.Uninstall(_configPath.Text),
                 "--uninstall", _configPath.Text))
@@ -602,6 +610,7 @@ public sealed class MainForm : Form
 
             LlmConfigurationStore.Uninstall(_userDirectory.Text);
             _ollama.UninstallPortable();
+            _llama.UninstallPortable();
             _apiKey.Clear();
             RefreshSetupStatus();
             ShowTrayIfNeeded();
@@ -709,6 +718,21 @@ public sealed class MainForm : Form
         finally
         {
             _browseCatalog.Enabled = true;
+        }
+    }
+
+    private void BrowseGguf(object? sender, EventArgs eventArgs)
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Filter = "GGUF models|*.gguf|All files|*.*",
+            CheckFileExists = true
+        };
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            _llamaSelection = dialog.FileName;
+            _model.Text = dialog.FileName;
+            Log($"Selected GGUF model: {dialog.FileName}");
         }
     }
 
@@ -867,20 +891,23 @@ public sealed class MainForm : Form
     private void UpdateProviderFields()
     {
         var remote = _provider.SelectedIndex == 1;
+        var llama = _provider.SelectedIndex == 2;
+        var local = _provider.SelectedIndex == 0;
 
-        if (remote != (_lastProviderIndex == 1))
+        if (_lastProviderIndex == 0 && !local)
         {
-            if (_lastProviderIndex == 0)
-            {
-                _ollamaSelection = _model.Text.Trim();
-            }
-            else
-            {
-                _remoteSelection = _model.Text.Trim();
-            }
+            _ollamaSelection = _model.Text.Trim();
+        }
+        else if (_lastProviderIndex == 1 && !remote)
+        {
+            _remoteSelection = _model.Text.Trim();
+        }
+        else if (_lastProviderIndex == 2 && !llama)
+        {
+            _llamaSelection = _model.Text.Trim();
         }
 
-        _lastProviderIndex = remote ? 1 : 0;
+        _lastProviderIndex = _provider.SelectedIndex;
 
         _endpoint.Visible = remote;
         _apiKey.Visible = remote;
@@ -894,13 +921,35 @@ public sealed class MainForm : Form
             _apiKeyLabel.Visible = remote;
         }
 
-        _browseCatalog.Visible = !remote;
+        _browseCatalog.Visible = local;
         _checkModels.Visible = remote;
-        _benchmarkModel.Visible = !remote;
-        _modelTip.Visible = !remote && _modelTip.Text.Length != 0;
+        _browseGguf.Visible = llama;
+        _benchmarkModel.Visible = local;
+        _modelTip.Visible = local && _modelTip.Text.Length != 0;
 
-        ApplyModelChoices(remote ? _remoteModelChoices : _ollamaModelChoices, remote);
-        _configureLlm.Text = remote ? "Start Secure Bridge" : "Configure and Start";
+        if (llama)
+        {
+            _model.BeginUpdate();
+            try
+            {
+                _model.Items.Clear();
+            }
+            finally
+            {
+                _model.EndUpdate();
+            }
+
+            _model.Text = _llamaSelection;
+            _model.Enabled = true;
+        }
+        else
+        {
+            ApplyModelChoices(remote ? _remoteModelChoices : _ollamaModelChoices, remote);
+        }
+
+        _configureLlm.Text = remote ? "Start Secure Bridge"
+            : llama ? "Configure and Start llama.cpp"
+            : "Configure and Start";
     }
 
     private void ApplyModelChoices(IReadOnlyList<string> choices, bool remote)
@@ -998,6 +1047,10 @@ public sealed class MainForm : Form
             {
                 await ConfigureOllamaAsync();
             }
+            else if (_provider.SelectedIndex == 2)
+            {
+                await ConfigureLlamaCppAsync();
+            }
             else
             {
                 await ConfigureRemoteApiAsync();
@@ -1049,6 +1102,45 @@ public sealed class MainForm : Form
         ShowTrayIfNeeded();
     }
 
+    private async Task ConfigureLlamaCppAsync()
+    {
+        var gguf = _model.Text.Trim();
+        if (gguf.Length == 0 || !File.Exists(gguf))
+        {
+            throw new FileNotFoundException("Select a .gguf model file first.", gguf);
+        }
+
+        await _bridge.StopAsync();
+        if (_llama.FindExecutable() is null)
+        {
+            var answer = MessageBox.Show(
+                this,
+                "llama-server is not installed. Download llama.cpp? No desktop app will be installed.",
+                "Install llama.cpp",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question,
+                MessageBoxDefaultButton.Button1);
+            if (answer != DialogResult.Yes)
+            {
+                return;
+            }
+
+            var executable = await _llama.InstallAsync(new Progress<OllamaProgress>(UpdateProgress));
+            Log($"llama.cpp installed: {executable}");
+        }
+
+        UpdateProgress(new OllamaProgress("Starting llama-server"));
+        await _llama.EnsureServerAsync(gguf, new Progress<OllamaProgress>(UpdateProgress));
+        var servedModel = LlamaCppDriver.DisplayModelName(
+            await _llama.GetServedModelNameAsync(), gguf);
+        await _llama.WarmModelAsync(servedModel, new Progress<OllamaProgress>(UpdateProgress));
+        var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        LlmConfigurationStore.SaveOpenAiBridge(
+            _userDirectory.Text, servedModel, _llama.Endpoint, token);
+        Log($"llama.cpp configured: {servedModel} at {_llama.Endpoint}");
+        ShowTrayIfNeeded();
+    }
+
     private async Task ConfigureRemoteApiAsync()
     {
         var profile = new RemoteApiProfile(
@@ -1074,6 +1166,7 @@ public sealed class MainForm : Form
         {
             await _bridge.StopAsync();
             await _ollama.UnloadModelAsync(_model.Text);
+            await _llama.StopOwnedServerAsync();
             LlmConfigurationStore.Disable(_userDirectory.Text);
             Log("LLM integration disabled.");
             ShowTrayIfNeeded();
@@ -1218,7 +1311,7 @@ public sealed class MainForm : Form
     private void MinimizeToTray()
     {
         if (WindowState != FormWindowState.Minimized ||
-            !_bridge.IsRunning && !_ollama.OwnsServer)
+            !_bridge.IsRunning && !_ollama.OwnsServer && !_llama.OwnsServer)
         {
             return;
         }
@@ -1237,12 +1330,12 @@ public sealed class MainForm : Form
 
     private void ShowTrayIfNeeded()
     {
-        _trayIcon.Visible = _bridge.IsRunning || _ollama.OwnsServer;
+        _trayIcon.Visible = _bridge.IsRunning || _ollama.OwnsServer || _llama.OwnsServer;
     }
 
     private void HandleClosing(object? sender, FormClosingEventArgs eventArgs)
     {
-        if (_allowClose || !_bridge.IsRunning && !_ollama.OwnsServer)
+        if (_allowClose || !_bridge.IsRunning && !_ollama.OwnsServer && !_llama.OwnsServer)
         {
             return;
         }
@@ -1264,6 +1357,7 @@ public sealed class MainForm : Form
         _trayIcon.Dispose();
         _bridge.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _ollama.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        _llama.DisposeAsync().AsTask().GetAwaiter().GetResult();
         Icon?.Dispose();
         base.OnFormClosed(eventArgs);
     }

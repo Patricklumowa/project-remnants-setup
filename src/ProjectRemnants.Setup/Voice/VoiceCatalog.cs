@@ -6,11 +6,18 @@ public sealed record VoiceModel(string Id, string Title, string Summary, VoiceAs
 
 public static class VoiceCatalog
 {
-    public static VoiceAsset Engine { get; } = new(
-        "whisper-bin-x64.zip",
-        new Uri("https://github.com/ggml-org/whisper.cpp/releases/download/b5130/whisper-bin-x64.zip"),
-        "f9ec6c52a2e949b62ab51fa21d0d497958f9e41c3010c157c4e42932d5316f3c",
-        8_573_270);
+    public static VoiceAsset Engine { get; } =
+        OperatingSystem.IsWindows()
+            ? new VoiceAsset(
+                "whisper-bin-x64.zip",
+                new Uri("https://github.com/ggml-org/whisper.cpp/releases/download/b5130/whisper-bin-x64.zip"),
+                "f9ec6c52a2e949b62ab51fa21d0d497958f9e41c3010c157c4e42932d5316f3c",
+                8_573_270)
+            : new VoiceAsset(
+                "whisper-bin-ubuntu-x64.tar.gz",
+                new Uri("https://github.com/ggml-org/whisper.cpp/releases/download/b5130/whisper-bin-ubuntu-x64.tar.gz"),
+                "53e7fd8b5764edad916b8848dd0af6abb1ff1d3b86c899e79c78652412536c32",
+                9_793_438);
 
     public static IReadOnlyList<VoiceModel> Models { get; } =
     [

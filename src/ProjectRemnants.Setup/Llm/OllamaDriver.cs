@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO.Compression;
 using System.Net.Http.Json;
 using System.Text.Json;
+using ProjectRemnants.Setup.Voice;
 
 namespace ProjectRemnants.Setup.Llm;
 
@@ -26,6 +27,8 @@ public sealed class OllamaDriver : IAsyncDisposable
     private static readonly Uri Server = new("http://127.0.0.1:11434/");
     private static readonly Uri WindowsCli = new("https://ollama.com/download/ollama-windows-amd64.zip");
     private static readonly Uri WindowsAmd = new("https://ollama.com/download/ollama-windows-amd64-rocm.zip");
+    private static readonly Uri LinuxCli = new("https://ollama.com/download/ollama-linux-amd64.tar.zst");
+    private static readonly Uri LinuxAmd = new("https://ollama.com/download/ollama-linux-amd64-rocm.tar.zst");
     private static readonly string PortableDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "ProjectRemnants", "Ollama");
@@ -35,6 +38,9 @@ public sealed class OllamaDriver : IAsyncDisposable
 
     public string? ExecutablePath { get; private set; }
     public bool OwnsServer => _ownedServer is { HasExited: false };
+
+    public static string ExecutableFileName =>
+        OperatingSystem.IsWindows() ? "ollama.exe" : "ollama";
 
     public string? FindExecutable()
     {
@@ -48,18 +54,42 @@ public sealed class OllamaDriver : IAsyncDisposable
         {
             candidates.AddRange((path ?? string.Empty)
                 .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
-                .Select(directory => Path.Combine(directory.Trim().Trim('"'), "ollama.exe")));
+                .Select(directory => Path.Combine(directory.Trim().Trim('"'), ExecutableFileName)));
         }
 
-        candidates.Add(Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Programs", "Ollama", "ollama.exe"));
-        candidates.Add(Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            "Ollama", "ollama.exe"));
-        candidates.Add(Path.Combine(PortableDirectory, "ollama.exe"));
+        if (OperatingSystem.IsWindows())
+        {
+            candidates.Add(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Programs", "Ollama", ExecutableFileName));
+            candidates.Add(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "Ollama", ExecutableFileName));
+        }
+
+        var portable = FindExecutableIn(PortableDirectory);
+        if (portable is not null)
+        {
+            candidates.Add(portable);
+        }
+
         ExecutablePath = candidates.FirstOrDefault(File.Exists);
         return ExecutablePath;
+    }
+
+    private static string? FindExecutableIn(string directory)
+    {
+        try
+        {
+            return Directory.Exists(directory)
+                ? Directory.EnumerateFiles(directory, ExecutableFileName, SearchOption.AllDirectories)
+                    .FirstOrDefault()
+                : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     public async Task<string> InstallAsync(
@@ -68,20 +98,23 @@ public sealed class OllamaDriver : IAsyncDisposable
     {
         var parent = Path.GetDirectoryName(PortableDirectory)!;
         var staging = Path.Combine(parent, $".Ollama-{Guid.NewGuid():N}");
-        var archive = Path.Combine(Path.GetTempPath(), $"Ollama-{Guid.NewGuid():N}.zip");
+        var extension = OperatingSystem.IsWindows() ? ".zip" : ".tar.zst";
+        var archive = Path.Combine(Path.GetTempPath(), $"Ollama-{Guid.NewGuid():N}{extension}");
         try
         {
             Directory.CreateDirectory(staging);
+            var mainPackage = OperatingSystem.IsWindows() ? WindowsCli : LinuxCli;
             await DownloadAndExtractAsync(
-                WindowsCli, "Ollama CLI", archive, staging, progress, cancellationToken);
+                mainPackage, "Ollama CLI", archive, staging, progress, cancellationToken);
             if (RequiresAmdPackage())
             {
+                var amdPackage = OperatingSystem.IsWindows() ? WindowsAmd : LinuxAmd;
                 await DownloadAndExtractAsync(
-                    WindowsAmd, "Ollama AMD support", archive, staging, progress, cancellationToken);
+                    amdPackage, "Ollama AMD support", archive, staging, progress, cancellationToken);
             }
 
             var executable = Directory.EnumerateFiles(
-                staging, "ollama.exe", SearchOption.AllDirectories).FirstOrDefault()
+                staging, ExecutableFileName, SearchOption.AllDirectories).FirstOrDefault()
                 ?? throw new InvalidDataException("The Ollama CLI package is invalid.");
             var relativeExecutable = Path.GetRelativePath(staging, executable);
             File.WriteAllText(Path.Combine(staging, PortableMarker), string.Empty);
@@ -98,6 +131,20 @@ public sealed class OllamaDriver : IAsyncDisposable
 
             Directory.Move(staging, PortableDirectory);
             ExecutablePath = Path.Combine(PortableDirectory, relativeExecutable);
+            if (!OperatingSystem.IsWindows())
+            {
+                try
+                {
+                    File.SetUnixFileMode(ExecutablePath,
+                        UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+                        UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+                        UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+                }
+                catch (Exception)
+                {
+                }
+            }
+
             return ExecutablePath;
         }
         finally
@@ -189,6 +236,33 @@ public sealed class OllamaDriver : IAsyncDisposable
         IProgress<OllamaProgress>? progress,
         CancellationToken cancellationToken)
     {
+        if (archive.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+        {
+            await ExtractZipAsync(archive, destination, name, progress, cancellationToken);
+            return;
+        }
+
+        progress?.Report(new OllamaProgress($"Installing {name}", null, true));
+        await using (var file = File.OpenRead(archive))
+        await using (var zstd = new ZstdSharp.DecompressionStream(file))
+        {
+            VoiceInstaller.ValidateTarEntries(zstd, cancellationToken);
+        }
+
+        await using (var file = File.OpenRead(archive))
+        await using (var zstd = new ZstdSharp.DecompressionStream(file))
+        {
+            System.Formats.Tar.TarFile.ExtractToDirectory(zstd, destination, overwriteFiles: true);
+        }
+    }
+
+    private static async Task ExtractZipAsync(
+        string archive,
+        string destination,
+        string name,
+        IProgress<OllamaProgress>? progress,
+        CancellationToken cancellationToken)
+    {
         progress?.Report(new OllamaProgress($"Installing {name}", 0, true));
         using var package = ZipFile.OpenRead(archive);
         var total = package.Entries.Sum(entry => entry.Length);
@@ -241,12 +315,22 @@ public sealed class OllamaDriver : IAsyncDisposable
         }
     }
 
+    private static string NvidiaSmi =>
+        OperatingSystem.IsWindows() ? "nvidia-smi.exe" : "nvidia-smi";
+
     private static bool RequiresAmdPackage()
     {
         if (!string.IsNullOrWhiteSpace(Run(
-            "nvidia-smi.exe", "--query-gpu=name", "--format=csv,noheader")))
+            NvidiaSmi, "--query-gpu=name", "--format=csv,noheader")))
         {
             return false;
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            var lspci = Run("lspci");
+            return lspci?.Contains("AMD", StringComparison.OrdinalIgnoreCase) == true ||
+                lspci?.Contains("Radeon", StringComparison.OrdinalIgnoreCase) == true;
         }
 
         var controllers = Run("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
@@ -370,7 +454,7 @@ public sealed class OllamaDriver : IAsyncDisposable
     private static IReadOnlyList<GpuAdapter> QueryGpuInventory()
     {
         var records = new List<GpuAdapter>();
-        var nvidia = Run("nvidia-smi.exe",
+        var nvidia = Run(NvidiaSmi,
             "--query-gpu=name,memory.total", "--format=csv,noheader,nounits");
         if (!string.IsNullOrWhiteSpace(nvidia))
         {
@@ -386,6 +470,39 @@ public sealed class OllamaDriver : IAsyncDisposable
                     records.Add(new GpuAdapter(fields[0], vramGb, Discrete: true));
                 }
             }
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            var lspci = Run("lspci");
+            if (!string.IsNullOrWhiteSpace(lspci))
+            {
+                foreach (var line in lspci.Split('\n'))
+                {
+                    var isGraphics = line.Contains("VGA", StringComparison.OrdinalIgnoreCase) ||
+                        line.Contains("3D controller", StringComparison.OrdinalIgnoreCase);
+                    if (!isGraphics)
+                    {
+                        continue;
+                    }
+
+                    var colon = line.IndexOf(':', line.IndexOf(':') + 1);
+                    var name = colon >= 0 ? line[(colon + 1)..].Trim() : line.Trim();
+                    if (name.Length == 0 || records.Any(record =>
+                        record.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        continue;
+                    }
+
+                    var integrated =
+                        name.Contains("Intel", StringComparison.OrdinalIgnoreCase) &&
+                        (name.Contains("UHD", StringComparison.OrdinalIgnoreCase) ||
+                         name.Contains("HD Graphics", StringComparison.OrdinalIgnoreCase));
+                    records.Add(new GpuAdapter(name, 0, Discrete: !integrated));
+                }
+            }
+
+            return records;
         }
 
         var output = Run("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
@@ -550,13 +667,17 @@ public sealed class OllamaDriver : IAsyncDisposable
 
         var executable = ExecutablePath ?? FindExecutable()
             ?? throw new FileNotFoundException("Ollama is not installed.");
-        _ownedServer = Process.Start(new ProcessStartInfo(executable, "serve")
+        var startInfo = new ProcessStartInfo(executable, "serve")
         {
             UseShellExecute = false,
             CreateNoWindow = true,
-            WindowStyle = ProcessWindowStyle.Hidden,
             WorkingDirectory = Path.GetDirectoryName(executable)
-        }) ?? throw new InvalidOperationException("Ollama did not start.");
+        };
+#if WINDOWS
+        startInfo.WindowStyle = ProcessWindowStyle.Hidden;
+#endif
+        _ownedServer = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Ollama did not start.");
 
         var deadline = DateTime.UtcNow.AddSeconds(60);
         while (DateTime.UtcNow < deadline)

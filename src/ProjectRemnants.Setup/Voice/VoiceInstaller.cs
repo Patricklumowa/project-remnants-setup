@@ -14,7 +14,9 @@ public sealed class VoiceInstaller
 {
     private const string Marker = ".project-remnants-portable";
     private const string ConfigFileName = "speech.properties";
-    private const string ServerName = "whisper-server.exe";
+
+    public static string ServerName =>
+        OperatingSystem.IsWindows() ? "whisper-server.exe" : "whisper-server";
 
     private readonly string _root;
     private readonly HttpClient _http;
@@ -119,18 +121,32 @@ public sealed class VoiceInstaller
     private async Task InstallEngineAsync(
         VoiceAsset engine, IProgress<VoiceProgress>? progress, CancellationToken cancellationToken)
     {
-        var archive = Path.Combine(Path.GetTempPath(), $"whisper-engine-{Guid.NewGuid():N}.zip");
+        var extension = engine.FileName.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase) ||
+            engine.FileName.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase)
+                ? ".tar.gz"
+                : Path.GetExtension(engine.FileName);
+        var archive = Path.Combine(Path.GetTempPath(), $"whisper-engine-{Guid.NewGuid():N}{extension}");
         var staging = Path.Combine(_root, $".bin-{Guid.NewGuid():N}");
         try
         {
             await DownloadAsync(engine, "Downloading the speech engine", archive, progress, cancellationToken);
             Directory.CreateDirectory(staging);
             progress?.Report(new VoiceProgress("Installing the speech engine"));
-            ExtractEngine(archive, staging);
-            if (!File.Exists(Path.Combine(staging, ServerName)))
+            if (extension.Equals(".tar.gz", StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidDataException("The speech engine package does not contain whisper-server.exe.");
+                await ExtractTarGzAsync(archive, staging, cancellationToken);
+                TrimPayload(staging);
             }
+            else
+            {
+                ExtractEngine(archive, staging);
+            }
+
+            var server = Directory.EnumerateFiles(staging, ServerName, SearchOption.AllDirectories)
+                .FirstOrDefault()
+                ?? throw new InvalidDataException(
+                    $"The speech engine package does not contain {ServerName}.");
+            var payloadDirectory = Path.GetDirectoryName(server)!;
 
             var target = Path.Combine(_root, "bin");
             var previous = Path.Combine(_root, $".bin-old-{Guid.NewGuid():N}");
@@ -139,7 +155,34 @@ public sealed class VoiceInstaller
                 Directory.Move(target, previous);
             }
 
-            Directory.Move(staging, target);
+            if (string.Equals(
+                    Path.GetFullPath(payloadDirectory), Path.GetFullPath(staging),
+                    OperatingSystem.IsWindows()
+                        ? StringComparison.OrdinalIgnoreCase
+                        : StringComparison.Ordinal))
+            {
+                Directory.Move(staging, target);
+            }
+            else
+            {
+                Directory.Move(payloadDirectory, target);
+            }
+
+            var serverPath = Path.Combine(target, ServerName);
+            if (!OperatingSystem.IsWindows() && File.Exists(serverPath))
+            {
+                try
+                {
+                    File.SetUnixFileMode(serverPath,
+                        UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+                        UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+                        UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+                }
+                catch (Exception)
+                {
+                }
+            }
+
             if (Directory.Exists(previous))
             {
                 Directory.Delete(previous, recursive: true);
@@ -159,6 +202,24 @@ public sealed class VoiceInstaller
         }
     }
 
+    private static bool WantedEngineFile(string name)
+    {
+        if (name.Equals(ServerName, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+                && !name.StartsWith("SDL2", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return name.StartsWith("lib", StringComparison.Ordinal)
+            && name.Contains(".so", StringComparison.Ordinal)
+            && !name.StartsWith("libSDL2", StringComparison.Ordinal);
+    }
+
     private static void ExtractEngine(string archive, string destination)
     {
         using var zip = ZipFile.OpenRead(archive);
@@ -170,10 +231,7 @@ public sealed class VoiceInstaller
                 continue;
             }
 
-            var wanted = name.Equals(ServerName, StringComparison.OrdinalIgnoreCase)
-                || (name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
-                    && !name.StartsWith("SDL2", StringComparison.OrdinalIgnoreCase));
-            if (!wanted)
+            if (!WantedEngineFile(name))
             {
                 continue;
             }
@@ -181,6 +239,60 @@ public sealed class VoiceInstaller
             entry.ExtractToFile(Path.Combine(destination, name), overwrite: true);
         }
     }
+
+    private static void TrimPayload(string staging)
+    {
+        foreach (var path in Directory.EnumerateFiles(staging, "*", SearchOption.AllDirectories))
+        {
+            if (!WantedEngineFile(Path.GetFileName(path)))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    private static async Task ExtractTarGzAsync(
+        string archive, string destination, CancellationToken cancellationToken)
+    {
+        await using (var file = File.OpenRead(archive))
+        await using (var gzip = new System.IO.Compression.GZipStream(
+            file, System.IO.Compression.CompressionMode.Decompress))
+        {
+            ValidateTarEntries(gzip, cancellationToken);
+        }
+
+        await using (var file = File.OpenRead(archive))
+        await using (var gzip = new System.IO.Compression.GZipStream(
+            file, System.IO.Compression.CompressionMode.Decompress))
+        {
+            System.Formats.Tar.TarFile.ExtractToDirectory(gzip, destination, overwriteFiles: true);
+        }
+    }
+
+    public static void ValidateTarEntries(Stream stream, CancellationToken cancellationToken)
+    {
+        using var reader = new System.Formats.Tar.TarReader(stream, leaveOpen: true);
+        while (reader.GetNextEntry() is { } entry)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (IsUnsafePath(entry.Name))
+            {
+                throw new InvalidDataException("The package contains an invalid path.");
+            }
+
+            // .so version links (e.g. libwhisper.so.1 -> libwhisper.so.1.9.4)
+            // are normal; only reject links that escape the package.
+            if (entry.EntryType is System.Formats.Tar.TarEntryType.SymbolicLink
+                or System.Formats.Tar.TarEntryType.HardLink &&
+                (string.IsNullOrEmpty(entry.LinkName) || IsUnsafePath(entry.LinkName)))
+            {
+                throw new InvalidDataException("The package contains an invalid link.");
+            }
+        }
+    }
+
+    private static bool IsUnsafePath(string name) =>
+        Path.IsPathRooted(name) || name.Split('/').Any(part => part == "..");
 
     private async Task DownloadAsync(
         VoiceAsset asset,
