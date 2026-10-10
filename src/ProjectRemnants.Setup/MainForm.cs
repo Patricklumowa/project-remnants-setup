@@ -23,6 +23,7 @@ public sealed class MainForm : Form
     private Label? _apiKeyLabel;
     private FlowLayoutPanel? _modelTrailing;
     private readonly Button _browseCatalog = new();
+    private readonly Button _useRemnants = new();
     private readonly Button _checkModels = new();
     private IReadOnlyList<string> _ollamaModelChoices = [];
     private IReadOnlyList<string> _remoteModelChoices = [];
@@ -310,6 +311,10 @@ public sealed class MainForm : Form
         _model.Text = "llama3.2:3b";
         ConfigureButton(_browseCatalog, "Browse catalogue...", BrowseCatalog);
         _browseCatalog.Margin = new Padding(8, 0, 0, 0);
+        ConfigureButton(_useRemnants, "Use Remnants LLM", UseRemnantsModel, true);
+        _useRemnants.Margin = new Padding(8, 0, 0, 0);
+        _toolTip.SetToolTip(
+            _useRemnants, "Select Remnants LLM v5, the model made for this mod");
         ConfigureButton(_checkModels, "Check availability", CheckRemoteModels);
         _checkModels.Margin = new Padding(8, 0, 0, 0);
         _toolTip.SetToolTip(
@@ -322,6 +327,7 @@ public sealed class MainForm : Form
             WrapContents = false,
             Margin = Padding.Empty
         };
+        _modelTrailing.Controls.Add(_useRemnants);
         _modelTrailing.Controls.Add(_browseCatalog);
         _modelTrailing.Controls.Add(_checkModels);
         AddField(layout, 3, "Model", _model, _modelTrailing);
@@ -682,6 +688,13 @@ public sealed class MainForm : Form
         }
     }
 
+    private void UseRemnantsModel(object? sender, EventArgs eventArgs)
+    {
+        _ollamaSelection = RemnantsModel.Name;
+        _model.Text = RemnantsModel.Name;
+        Log($"Selected {RemnantsModel.Title}. Press Configure and Start to download and use it.");
+    }
+
     private async void BrowseCatalog(object? sender, EventArgs eventArgs)
     {
         if (_provider.SelectedIndex != 0)
@@ -810,11 +823,11 @@ public sealed class MainForm : Form
         {
             var selected = _model.Text.Trim();
             var models = await _ollama.GetModelsAsync();
-            IReadOnlyList<string> choices = models;
+            IReadOnlyList<string> choices = RemnantsModel.WithRecommendation(models);
             if (models.Count == 0)
             {
                 Log("No downloaded Ollama models found. Checking this PC...");
-                choices = await Task.Run(OllamaDriver.RecommendModelsForThisPc);
+                choices = await Task.Run(RemnantsModel.RecommendForThisPc);
             }
 
             if (_provider.SelectedIndex != 0)
@@ -845,15 +858,16 @@ public sealed class MainForm : Form
         _gpuStatus.ForeColor = Color.FromArgb(70, 76, 86);
         try
         {
-            var (gpu, vram) = await Task.Run(() =>
-                (OllamaDriver.DetectPreferredGpu(), OllamaDriver.DetectVramGb()));
+            var (gpu, vram, ram) = await Task.Run(() =>
+                (OllamaDriver.DetectPreferredGpu(), OllamaDriver.DetectVramGb(),
+                    OllamaDriver.DetectSystemRamGb()));
             _gpuStatus.Text = gpu.Summary;
             _gpuStatus.ForeColor = gpu.Acceleration == GpuAcceleration.None
                 ? Color.DarkGoldenrod
                 : Color.FromArgb(30, 120, 72);
             _toolTip.SetToolTip(_gpuStatus, gpu.Detail);
 
-            _modelTip.Text = OllamaDriver.RecommendationTip(vram);
+            _modelTip.Text = RemnantsModel.Tip(vram, ram);
             _modelTip.Visible = _provider.SelectedIndex == 0;
         }
         catch (Exception exception)
@@ -895,6 +909,7 @@ public sealed class MainForm : Form
         }
 
         _browseCatalog.Visible = !remote;
+        _useRemnants.Visible = !remote;
         _checkModels.Visible = remote;
         _benchmarkModel.Visible = !remote;
         _modelTip.Visible = !remote && _modelTip.Text.Length != 0;
