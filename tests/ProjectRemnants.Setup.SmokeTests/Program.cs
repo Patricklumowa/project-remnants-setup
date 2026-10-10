@@ -20,6 +20,7 @@ try
     await TestForcedModelBenchmark(root);
     TestGpuDetection();
     TestModelFit();
+    await TestRemnantsRecommendation(root);
     TestCatalogParsing();
     TestRemoteModelDiscovery();
     await TestVoiceInstaller(root);
@@ -333,6 +334,73 @@ static void TestModelFit()
     Assert(!recommended.SequenceEqual(["llama3.2:1b"]), "An 8 GB GPU fell back to the tiny model.");
     Assert(OllamaDriver.RecommendModels(0.5).SequenceEqual(["llama3.2:1b"]),
         "A tiny GPU did not fall back to the smallest model.");
+}
+
+static async Task TestRemnantsRecommendation(string root)
+{
+    Assert(RemnantsModel.Name == "hf.co/PatrickPat/remnants-llm-v5-GGUF:Q4_K_M",
+        "The Remnants model name changed.");
+    Assert(RemnantsModel.IsRemnants(RemnantsModel.Name) &&
+        RemnantsModel.IsRemnants("remnants-llm-v5:latest") &&
+        !RemnantsModel.IsRemnants("qwen3:8b") && !RemnantsModel.IsRemnants(null),
+        "Remnants model names were not recognised.");
+
+    Assert(RemnantsModel.Fit(7.96, 16) == Runability.Gpu,
+        "Remnants LLM did not fit an 8 GB GPU.");
+    Assert(RemnantsModel.Fit(0, 16) == Runability.CpuOnly,
+        "Remnants LLM did not run on a GPU-less PC with enough RAM.");
+    Assert(RemnantsModel.Fit(0, 2) == Runability.TooBig,
+        "Remnants LLM was judged runnable on a PC with 2 GB of RAM.");
+
+    Assert(RemnantsModel.Recommend(7.96, 16).SequenceEqual(
+        [RemnantsModel.Name, "qwen3:8b", "qwen3:4b", "llama3.2:3b"]),
+        "Remnants LLM was not recommended first on an 8 GB GPU.");
+    Assert(RemnantsModel.Recommend(0, 16).SequenceEqual([RemnantsModel.Name, "llama3.2:1b"]),
+        "Remnants LLM was not recommended on a GPU-less PC.");
+    Assert(RemnantsModel.Recommend(0, 2).SequenceEqual(["llama3.2:1b"]),
+        "Remnants LLM was recommended on a PC that cannot run it.");
+
+    Assert(RemnantsModel.WithRecommendation(["qwen3:8b"]).SequenceEqual(
+        [RemnantsModel.Name, "qwen3:8b"]),
+        "Remnants LLM was not offered next to downloaded models.");
+    string[] installed = [RemnantsModel.Name.ToLowerInvariant(), "qwen3:8b"];
+    Assert(RemnantsModel.WithRecommendation(installed).SequenceEqual(installed),
+        "Remnants LLM was offered twice.");
+
+    var gpuTip = RemnantsModel.Tip(7.96, 16);
+    Assert(gpuTip.Contains("Remnants LLM v5") && gpuTip.Contains("8 GB GPU"),
+        "The GPU tip did not recommend Remnants LLM.");
+    Assert(RemnantsModel.Tip(0, 16).Contains("CPU"),
+        "The CPU tip did not mention the CPU.");
+    Assert(RemnantsModel.Tip(0, 2) == OllamaDriver.RecommendationTip(0),
+        "A PC that cannot run Remnants LLM did not get the generic tip.");
+
+    var featured = RemnantsModel.Feature(
+    [
+        new CatalogModel("qwen3", "Qwen", [], [new CatalogTag("8b", 8)]),
+        new CatalogModel(RemnantsModel.Repository, "duplicate", [], [])
+    ]);
+    Assert(featured.Count == 2 && featured[0].Name == RemnantsModel.Repository &&
+        featured[1].Name == "qwen3", "The catalogue did not list Remnants LLM first, once.");
+    Assert(featured[0].DownloadNames.Single() == RemnantsModel.Name,
+        "The catalogue entry does not download the Remnants model.");
+    Assert(RemnantsModel.DisplayName(featured[0]) == "Remnants LLM v5" &&
+        RemnantsModel.DisplayName(featured[1]) == "qwen3",
+        "The catalogue display names are wrong.");
+
+    var models = Path.Combine(root, "RemnantsModels");
+    var hosted = Path.Combine(
+        models, "manifests", "hf.co", "PatrickPat", "remnants-llm-v5-GGUF", "Q4_K_M");
+    var library = Path.Combine(
+        models, "manifests", "registry.ollama.ai", "library", "qwen3", "8b");
+    Directory.CreateDirectory(Path.GetDirectoryName(hosted)!);
+    Directory.CreateDirectory(Path.GetDirectoryName(library)!);
+    File.WriteAllText(hosted, "{}");
+    File.WriteAllText(library, "{}");
+    await using var ollama = new OllamaDriver();
+    Assert(ollama.GetDownloadedModels(models).SequenceEqual(
+        [RemnantsModel.Name, "qwen3:8b"]),
+        "A model from the Hugging Face host lost its host name.");
 }
 
 static void TestCatalogParsing()
