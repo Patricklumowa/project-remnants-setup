@@ -45,8 +45,7 @@ public static class RemnantsModel
         {
             Runability.Gpu =>
                 $"Recommended: {Title}, made for this mod. {size} GB, fits your " +
-                $"{vramGb.ToString("0.#", CultureInfo.InvariantCulture)} GB GPU. " +
-                "Press \"Use Remnants LLM\", then Configure and Start.",
+                $"{vramGb.ToString("0.#", CultureInfo.InvariantCulture)} GB GPU.",
             Runability.CpuOnly =>
                 $"Recommended: {Title}, made for this mod. {size} GB. Your GPU cannot hold it, " +
                 "so it runs on the CPU and replies are slower.",
