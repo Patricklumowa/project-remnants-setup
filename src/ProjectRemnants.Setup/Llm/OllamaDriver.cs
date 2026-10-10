@@ -519,8 +519,9 @@ public sealed class OllamaDriver : IAsyncDisposable
             return null;
         }
 
-        var name = parts[1..^1];
-        if (name[0].Equals("library", StringComparison.OrdinalIgnoreCase))
+        var defaultRegistry = parts[0].Equals("registry.ollama.ai", StringComparison.OrdinalIgnoreCase);
+        var name = defaultRegistry ? parts[1..^1] : parts[..^1];
+        if (defaultRegistry && name[0].Equals("library", StringComparison.OrdinalIgnoreCase))
         {
             name = name[1..];
         }
