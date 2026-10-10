@@ -316,7 +316,7 @@ public sealed class ModelCatalogForm : Form
         _empty.Visible = _models.Count == 0;
         try
         {
-            _models = await OllamaCatalog.LoadAsync(_http);
+            _models = RemnantsModel.Feature(await OllamaCatalog.LoadAsync(_http));
             _installed = new HashSet<string>(
                 _ollama.GetDownloadedModels().Select(Normalize), StringComparer.OrdinalIgnoreCase);
             PopulateList();
@@ -450,7 +450,7 @@ public sealed class ModelCatalogForm : Form
             return;
         }
 
-        _detailName.Text = model.Name;
+        _detailName.Text = RemnantsModel.DisplayName(model);
         var capabilities = model.Capabilities.Count == 0
             ? "chat"
             : string.Join("  \u00B7  ", model.Capabilities);
@@ -806,7 +806,7 @@ public sealed class ModelCatalogForm : Form
             var nameTop = bounds.Top + padding - Scale(2);
             TextRenderer.DrawText(
                 e.Graphics,
-                row.Model.Name,
+                RemnantsModel.DisplayName(row.Model),
                 _nameFont,
                 new Rectangle(textLeft, nameTop, textWidth, _nameHeight),
                 TextPrimary,
