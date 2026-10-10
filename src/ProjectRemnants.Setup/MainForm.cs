@@ -312,7 +312,7 @@ public sealed class MainForm : Form
         ConfigureButton(_browseCatalog, "Browse catalogue...", BrowseCatalog);
         _browseCatalog.Margin = new Padding(8, 0, 0, 0);
         ConfigureButton(_useRemnants, "Use Remnants LLM", UseRemnantsModel, true);
-        _useRemnants.Margin = new Padding(8, 0, 0, 0);
+        _useRemnants.Margin = new Padding(0, 2, 0, 6);
         _toolTip.SetToolTip(
             _useRemnants, "Select Remnants LLM v5, the model made for this mod");
         ConfigureButton(_checkModels, "Check availability", CheckRemoteModels);
@@ -327,7 +327,6 @@ public sealed class MainForm : Form
             WrapContents = false,
             Margin = Padding.Empty
         };
-        _modelTrailing.Controls.Add(_useRemnants);
         _modelTrailing.Controls.Add(_browseCatalog);
         _modelTrailing.Controls.Add(_checkModels);
         AddField(layout, 3, "Model", _model, _modelTrailing);
@@ -343,8 +342,18 @@ public sealed class MainForm : Form
         _modelTip.Font = new Font("Segoe UI", 9F, FontStyle.Italic);
         _modelTip.Margin = new Padding(0, 2, 0, 6);
         _modelTip.Visible = false;
-        layout.Controls.Add(_modelTip, 1, 5);
-        layout.SetColumnSpan(_modelTip, 2);
+        var recommendation = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            Margin = Padding.Empty
+        };
+        recommendation.Controls.Add(_modelTip);
+        recommendation.Controls.Add(_useRemnants);
+        layout.Controls.Add(recommendation, 1, 5);
+        layout.SetColumnSpan(recommendation, 2);
 
         _endpoint.Text = "https://api.openai.com/v1";
         _endpointLabel = AddField(layout, 6, "Endpoint", _endpoint);
